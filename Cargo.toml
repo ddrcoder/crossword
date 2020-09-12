@@ -1,0 +1,11 @@
+[package]
+name = "scrabble"
+version = "0.1.0"
+authors = ["Tom Jackson <tjackson@fb.com>"]
+
+[dependencies]
+suffix = "0.3.0"
+ncurses = "5.73.0"
+time = "0.1"
+words = { path = "../words" }
+tui = { path = "../tui" }
