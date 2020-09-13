@@ -1,26 +1,25 @@
 extern crate ncurses;
 extern crate time;
-extern crate words;
 extern crate tui;
+extern crate words;
 
 mod crossword;
 
+use crossword::Crossword;
 use ncurses::*;
-use std::rc::Rc;
-use std::cell::RefCell;
 use tui::*;
 use words::dictionary::english_scrabble;
-use crossword::Crossword;
 
 fn main() {
-    initscr();
-    clear();
-    printw("Reading...\n");
     let mut store = String::new();
     let words = english_scrabble(&mut store).unwrap();
+    let mut crossword = Crossword::new(6, 6, &words);
+    crossword.choose_one();
+    initscr();
+    clear();
     refresh();
     ncurses::noecho();
     clear();
-    let crossword = Crossword::new(&words);
+    let mut root = crossword;
     root.interact();
 }
