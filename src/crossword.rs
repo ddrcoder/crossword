@@ -2,47 +2,30 @@
 extern crate rand;
 
 use ncurses::*;
-use rand::distributions::{Distribution, Uniform};
+use rand::distributions::{Distribution, Uniform, WeightedIndex};
 use std::cmp::max;
+use std::mem::swap;
 use tui::View;
 use words::{LetterInventory, LetterSet};
 
-#[derive(Clone, Default, Debug)]
-struct LineCell {
-  cell_index: usize,
-  inventory: LetterInventory,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Line<'a> {
   length: usize,
-  // histogram
-  active_words: usize,
   words: Vec<&'a str>,
-  cells: Vec<LineCell>,
+  cells: Vec<u32>,
+  inventories: Vec<LetterInventory>,
 }
 
 impl<'a> Line<'a> {
   fn reset_inventories(&mut self) {
-    for cell in &mut self.cells {
-      cell.inventory = LetterInventory::new();
+    for inv in &mut self.inventories {
+      *inv = LetterInventory::new();
     }
-    for word in &self.words[0..self.active_words] {
+    for word in &self.words {
       assert_eq!(word.len(), self.length);
       for (i, ch) in word.chars().enumerate() {
-        self.cells[i].inventory.add(ch);
-        assert_ne!(self.cells[i].inventory.letter_set().len(), 0, "{}", i);
+        self.inventories[i].add(ch);
       }
-    }
-    for (i, cell) in self.cells.iter().enumerate() {
-      assert_ne!(
-        cell.inventory.letter_set().len(),
-        0,
-        "{} in {:?} for {:?}",
-        i,
-        self.cells,
-        &self.words[0..self.active_words],
-      );
     }
   }
 
@@ -50,70 +33,54 @@ impl<'a> Line<'a> {
     assert_ne!(words.len(), 0);
     let mut ret = Self {
       length: length,
-      active_words: words.len(),
       words: words,
       cells: (0..length).map(|_| Default::default()).collect(),
+      inventories: (0..length).map(|_| Default::default()).collect(),
     };
     ret.reset_inventories();
     ret
   }
 
-  fn unpick(&mut self, cells: Vec<LineCell>, active_words: usize) {
-    //TODO
-  }
+  fn choose(&mut self, index: u8, ch: char) -> Line<'a> {
+    let mut new = Line {
+      length: self.length,
+      words: self
+        .words
+        .iter()
+        .cloned()
+        .filter(|w| w.chars().skip(index as usize).next() == Some(ch.to_ascii_uppercase()))
+        .collect(),
+      cells: self.cells.clone(),
+      inventories: self.inventories.clone(),
+    };
 
-  fn pick(&mut self, offset: usize, ch: char) {
-    // partition the word set down to only those words with this letter in this
-    // position.
-  }
-
-  fn choose(&mut self, index: usize, ch: char) {
-    let active_words = self.active_words;
-    let mut begin = 0;
-    let mut end = active_words;
-    assert_ne!(end, 0);
-    loop {
-      while begin < end
-        && self.words[begin].chars().skip(index).next() == Some(ch.to_ascii_uppercase())
-      {
-        begin += 1;
-      }
-      while begin < end
-        && self.words[end - 1].chars().skip(index).next() != Some(ch.to_ascii_uppercase())
-      {
-        end -= 1;
-      }
-      if begin == end {
-        break;
-      }
-      self.words.swap(begin, end - 1);
-    }
-
-    self.active_words = end;
-    self.reset_inventories();
+    new.reset_inventories();
+    swap(&mut new, self);
+    new
   }
 }
 
+#[derive(Default)]
 struct Cell {
   row: usize,
   col: usize,
-  down: usize,
-  down_offset: usize,
-  across: usize,
-  across_offset: usize,
+  lines: [(u32, u8); 2],
   choice: Option<char>,
   char_dist: LetterInventory,
 }
 
-struct Choice {}
+#[derive(Default)]
+struct Choice<'a> {
+  cell_index: usize,
+  save_lines: [Line<'a>; 2],
+}
 
 pub struct Crossword<'a> {
   width: usize,
   height: usize,
-  acrosses: Vec<Line<'a>>,
-  downs: Vec<Line<'a>>,
+  lines: Vec<Line<'a>>,
   cells: Vec<Cell>,
-  choices: Vec<Choice>,
+  choices: Vec<Choice<'a>>,
 }
 
 impl<'a> Crossword<'a> {
@@ -141,12 +108,6 @@ impl<'a> Crossword<'a> {
       .enumerate()
       .map(|(i, b)| b.map(|words| Line::new(i + 1, words)))
       .collect();
-    let mut acrosses: Vec<Line> = (0..height)
-      .map(|_| line_inits[width - 1].clone().unwrap())
-      .collect();
-    let mut downs: Vec<Line> = (0..width)
-      .map(|_| line_inits[height - 1].clone().unwrap())
-      .collect();
     let mut cells: Vec<Cell> = vec![];
     for i in 0..height {
       for j in 0..width {
@@ -154,29 +115,50 @@ impl<'a> Crossword<'a> {
         cells.push(Cell {
           row: i,
           col: j,
-          down: j,
-          down_offset: i,
-          across: i,
-          across_offset: j,
-          choice: None,
-          char_dist: LetterInventory::product(
-            &downs[j].cells[i].inventory,
-            &acrosses[i].cells[j].inventory,
-          ),
+          ..Default::default()
         });
-        downs[j].cells[i].cell_index = cell_index;
-        acrosses[i].cells[j].cell_index = cell_index;
       }
     }
+    let cell_index = |i, j| i * width + j;
+    let mut lines = vec![];
+    for i in 0..height {
+      let mut line = line_inits[width - 1].clone().unwrap();
+      for (j, cell) in line.cells.iter_mut().enumerate() {
+        let ci = cell_index(i, j);
+        *cell = ci as u32;
+        cells[ci].lines[0] = (lines.len() as u32, j as u8);
+      }
+      lines.push(line)
+    }
 
-    Self {
+    for j in 0..width {
+      let mut line = line_inits[height - 1].clone().unwrap();
+      for (i, cell) in line.cells.iter_mut().enumerate() {
+        let ci = cell_index(i, j);
+        *cell = ci as u32;
+        cells[ci].lines[1] = (lines.len() as u32, i as u8);
+      }
+      lines.push(line)
+    }
+    let mut ret = Self {
       width,
       height,
-      acrosses,
-      downs,
+      lines,
       cells,
       choices: vec![],
+    };
+    for i in 0..ret.cells.len() {
+      ret.update_cell(i);
     }
+    ret
+  }
+
+  pub fn update_cell(&mut self, index: usize) {
+    let c = &mut self.cells[index];
+    let a = &self.lines[c.lines[0].0 as usize].inventories[c.lines[0].1 as usize];
+    let b = &self.lines[c.lines[1].0 as usize].inventories[c.lines[1].1 as usize];
+    let prod = LetterInventory::product(a, b);
+    c.char_dist = prod;
   }
 
   pub fn choose_one(&mut self) -> bool {
@@ -187,59 +169,73 @@ impl<'a> Crossword<'a> {
     let inventory = &self.cells[cell_index].char_dist;
     let mut rng = rand::thread_rng();
     let set = inventory.letter_set();
-    //dbg!("{:?}", &set);
-    assert_ne!(set.len(), 0, "{:?}", &inventory);
-    // TODO: WeightedIndex
-    let ch = set
-      .chars()
-      .skip(Uniform::from(0..set.len()).sample(&mut rng))
-      .take(1)
-      .next()
-      .unwrap();
+    if set.len() == 0 {
+      return false;
+    }
+    let index = WeightedIndex::new(set.chars().map(|ch| inventory.count(ch)))
+      .unwrap()
+      .sample(&mut rng);
+    let ch = set.chars().skip(index).next().unwrap();
     let cell = &mut self.cells[cell_index];
     cell.choice = Some(ch);
-    let (across, across_offset, down, down_offset, row, col) = (
-      cell.across,
-      cell.across_offset,
-      cell.down,
-      cell.down_offset,
-      cell.row,
-      cell.col,
-    );
-    //dbg!( "A={:?} & B={:?}", &self.downs[down].cells[down_offset].inventory, &self.acrosses[across].cells[across_offset].inventory,);
-    self.downs[down].choose(down_offset, ch);
-    self.acrosses[across].choose(across_offset, ch);
-    let (cells, acrosses, downs) = (&mut self.cells, &self.acrosses, &self.downs);
-    for lc in downs[down]
-      .cells
-      .iter()
-      .chain(acrosses[across].cells.iter())
-    {
-      let c = &mut cells[lc.cell_index];
-      let a = &downs[c.down].cells[c.down_offset].inventory;
-      let b = &acrosses[c.across].cells[c.across_offset].inventory;
-      let prod = LetterInventory::product(a, b);
-      assert_ne!(
-        prod.letter_set().len(),
-        0,
-        "{}@{},{} <- {:?} vs {:?}",
-        ch,
-        row,
-        col,
-        a,
-        b
-      );
-      c.char_dist = prod;
+    mv(cell.row as i32, cell.col as i32);
+    addch(ch as u32);
+    let lines = cell.lines;
+    let mut choice = Choice {
+      cell_index,
+      ..Default::default()
+    };
+    for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
+      let line = &mut self.lines[index as usize];
+
+      choice.save_lines[slot] = line.choose(offset, ch);
+      let cells = self.lines[index as usize].cells.clone();
+      for lc in cells {
+        self.update_cell(lc as usize);
+      }
     }
 
-    self.choices.push(Choice {
-      // TODO
-
-    });
+    self.choices.push(choice);
     true
   }
 
-  fn undo_one(&mut self) {}
+  fn undo_one(&mut self) {
+    if let Some(choice) = self.choices.pop() {
+      let cell_index = choice.cell_index;
+      let cell = &mut self.cells[cell_index];
+      mv(cell.row as i32, cell.col as i32);
+      addch('_' as u32);
+      cell.choice = None;
+      let lines = cell.lines;
+      self.lines[lines[0].0 as usize] = choice.save_lines[0].clone();
+      self.lines[lines[1].0 as usize] = choice.save_lines[1].clone();
+      for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
+        let cells = self.lines[index as usize].cells.clone();
+        for lc in cells {
+          self.update_cell(lc as usize);
+        }
+      }
+    }
+  }
+
+  fn rec(&mut self, c: &mut usize) -> bool {
+    if self.choices.len() == self.width * self.height {
+      return true;
+    }
+    for _ in 0..3 {
+      *c += 1;
+      if *c % 10000 == 0 {
+        refresh();
+      }
+      if self.choose_one() {
+        if self.rec(c) {
+          return true;
+        }
+        self.undo_one();
+      }
+    }
+    return false;
+  }
 
   fn search(&self) -> Vec<String> {
     // Recursively choose letters by picking a cell (how?), then picking a
@@ -254,8 +250,18 @@ impl<'a> View for Crossword<'a> {
     loop {
       self.render(0, 0);
       self.cursor(0, 0);
-      let _ = getch();
-      self.choose_one();
+      match getch() {
+        0x7f => {
+          self.undo_one();
+        }
+        0x20 => {
+          let mut i = 0;
+          self.rec(&mut i);
+        }
+        _ => {
+          self.choose_one();
+        }
+      }
     }
   }
   fn render(&self, x: i32, mut y: i32) {
@@ -272,7 +278,7 @@ impl<'a> View for Crossword<'a> {
           addch(ch as u32);
         }
         None => {
-          addch(' ' as u32);
+          addch('_' as u32);
         }
       }
     }
