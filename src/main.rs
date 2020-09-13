@@ -13,8 +13,7 @@ use words::dictionary::english_scrabble;
 fn main() {
     let mut store = String::new();
     let words = english_scrabble(&mut store).unwrap();
-    let mut crossword = Crossword::new(7, 7, &words);
-    crossword.choose_one();
+    let mut crossword = Crossword::new(6, 6, &words);
     initscr();
     clear();
     refresh();

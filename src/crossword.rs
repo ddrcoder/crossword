@@ -161,14 +161,14 @@ impl<'a> Crossword<'a> {
     c.char_dist = prod;
   }
 
-  pub fn choose_one(&mut self) -> bool {
+  pub fn choose_one(&mut self, used_letters: &mut LetterSet) -> bool {
     let cell_index = (0..self.cells.len())
       .filter(|&i| self.cells[i].choice.is_none())
       .min_by_key(|&i| self.cells[i].char_dist.letter_set().len())
       .unwrap();
     let inventory = &self.cells[cell_index].char_dist;
     let mut rng = rand::thread_rng();
-    let set = inventory.letter_set();
+    let set = LetterSet::difference(inventory.letter_set(), used_letters);
     if set.len() == 0 {
       return false;
     }
@@ -176,6 +176,7 @@ impl<'a> Crossword<'a> {
       .unwrap()
       .sample(&mut rng);
     let ch = set.chars().skip(index).next().unwrap();
+    used_letters.insert(ch);
     let cell = &mut self.cells[cell_index];
     cell.choice = Some(ch);
     mv(cell.row as i32, cell.col as i32);
@@ -222,19 +223,18 @@ impl<'a> Crossword<'a> {
     if self.choices.len() == self.width * self.height {
       return true;
     }
-    for _ in 0..3 {
+    let mut used = LetterSet::new();
+    while self.choose_one(&mut used) {
       *c += 1;
       if *c % 10000 == 0 {
         refresh();
       }
-      if self.choose_one() {
-        if self.rec(c) {
-          return true;
-        }
-        self.undo_one();
+      if self.rec(c) {
+        return true;
       }
+      self.undo_one();
     }
-    return false;
+    false
   }
 
   fn search(&self) -> Vec<String> {
@@ -259,7 +259,7 @@ impl<'a> View for Crossword<'a> {
           self.rec(&mut i);
         }
         _ => {
-          self.choose_one();
+          //self.choose_one();
         }
       }
     }
