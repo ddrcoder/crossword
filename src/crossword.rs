@@ -1,8 +1,7 @@
-#![feature(iter_partition_in_place)]
 extern crate rand;
 
 use ncurses::*;
-use rand::distributions::{Distribution, Uniform, WeightedIndex};
+use rand::distributions::{Distribution, WeightedIndex};
 use std::cmp::max;
 use std::mem::swap;
 use tui::View;
@@ -111,7 +110,6 @@ impl<'a> Crossword<'a> {
     let mut cells: Vec<Cell> = vec![];
     for i in 0..height {
       for j in 0..width {
-        let cell_index = cells.len();
         cells.push(Cell {
           row: i,
           col: j,
@@ -200,7 +198,7 @@ impl<'a> Crossword<'a> {
     true
   }
 
-  fn undo_one(&mut self) {
+  fn undo_one(&mut self) -> bool {
     if let Some(choice) = self.choices.pop() {
       let cell_index = choice.cell_index;
       let cell = &mut self.cells[cell_index];
@@ -210,12 +208,15 @@ impl<'a> Crossword<'a> {
       let lines = cell.lines;
       self.lines[lines[0].0 as usize] = choice.save_lines[0].clone();
       self.lines[lines[1].0 as usize] = choice.save_lines[1].clone();
-      for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
-        let cells = self.lines[index as usize].cells.clone();
+      for (index, _) in &lines[..] {
+        let cells = self.lines[*index as usize].cells.clone();
         for lc in cells {
           self.update_cell(lc as usize);
         }
       }
+      true
+    } else {
+      false
     }
   }
 
@@ -254,12 +255,13 @@ impl<'a> View for Crossword<'a> {
         0x7f => {
           self.undo_one();
         }
+        0x43 | 0x63 => while self.undo_one() {},
         0x20 => {
           let mut i = 0;
           self.rec(&mut i);
         }
         _ => {
-          //self.choose_one();
+          self.choose_one(&mut Default::default());
         }
       }
     }
@@ -267,10 +269,6 @@ impl<'a> View for Crossword<'a> {
   fn render(&self, x: i32, mut y: i32) {
     let mut height = 0;
     getmaxyx(stdscr(), &mut height, &mut 0);
-    let limit = (height - 3) as usize;
-    let before = time::precise_time_ns();
-    let matches = self.search();
-    let after = time::precise_time_ns();
     for cell in &self.cells {
       mv(cell.row as i32, cell.col as i32);
       match cell.choice {
