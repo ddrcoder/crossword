@@ -7,13 +7,11 @@ mod crossword;
 
 use crossword::Crossword;
 use ncurses::*;
-use tui::*;
-use words::dictionary::english_scrabble;
+use tui::View;
 
 fn main() {
-    let mut store = String::new();
-    let words = english_scrabble(&mut store).unwrap();
-    let crossword = Crossword::new(7, 6, &words);
+    let mut crossword = Crossword::new(8, 7).ok().unwrap();
+    while crossword.choose_one() {}
     initscr();
     clear();
     refresh();

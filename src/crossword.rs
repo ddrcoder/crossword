@@ -2,58 +2,104 @@ extern crate rand;
 
 use ncurses::*;
 use rand::distributions::{Distribution, WeightedIndex};
-use std::cmp::max;
+use std::io::Result;
 use std::mem::swap;
 use tui::View;
+use words::dictionary::{english_scrabble_dict, Dictionary};
 use words::{LetterInventory, LetterSet};
 
 #[derive(Clone, Debug, Default)]
-struct Line<'a> {
+struct Line {
   length: usize,
-  words: Vec<&'a str>,
+  words: Vec<u32>,
   cells: Vec<u32>,
   inventories: Vec<LetterInventory>,
 }
 
-impl<'a> Line<'a> {
-  fn reset_inventories(&mut self) {
-    for inv in &mut self.inventories {
-      *inv = LetterInventory::new();
-    }
-    for word in &self.words {
-      assert_eq!(word.len(), self.length);
-      for (i, ch) in word.chars().enumerate() {
-        self.inventories[i].add(ch);
+fn intersect(mut a: &[u32], mut b: &[u32]) -> Vec<u32> {
+  let (a_in, b_in) = (a, b);
+  assert!(!a.is_empty());
+  assert!(!b.is_empty());
+  if a.len() > b.len() {
+    return intersect(b, a);
+  }
+  let mut ret = vec![];
+  while a.len() != 0 {
+    let av = a[0];
+    a = &a[1..];
+    match b.binary_search(&av) {
+      Ok(bi) => {
+        ret.push(av);
+        b = &b[(bi + 1)..];
+      }
+      Err(bi) => {
+        b = &b[bi..];
+        if b.is_empty() {
+          break;
+        }
+        while !a.is_empty() && a[0] < b[0] {
+          a = &a[1..];
+        }
       }
     }
   }
+  assert!(!ret.is_empty(), "{:?} & {:?}", a_in, b_in);
+  ret
+}
 
-  fn new(length: usize, words: Vec<&'a str>) -> Self {
-    assert_ne!(words.len(), 0);
-    let mut ret = Self {
-      length: length,
-      words: words,
-      cells: (0..length).map(|_| Default::default()).collect(),
-      inventories: (0..length).map(|_| Default::default()).collect(),
-    };
-    ret.reset_inventories();
-    ret
+#[cfg(test)]
+mod test_intersect {
+  use super::intersect;
+
+  #[test]
+  fn basic() {
+    assert_eq!(
+      vec![6, 12],
+      intersect(&[2, 4, 6, 8, 10, 12, 14], &[3, 6, 9, 12, 15])
+    );
+  }
+}
+
+impl Line {
+  fn reset_inventories(&mut self, dictionary: &Dictionary) {
+    for inv in &mut self.inventories {
+      *inv = LetterInventory::new();
+    }
+    assert!(!self.words.is_empty());
+    let (words, inventories) = (self.words.iter().cloned(), &mut self.inventories);
+
+    let mut count = 0;
+    dictionary.visit_indices(words, |_, str| {
+      count += 1;
+      for (i, ch) in str.chars().enumerate() {
+        inventories[i].add(ch);
+      }
+    });
+    assert_ne!(count, 0);
+    for inv in &mut self.inventories {
+      assert!(!inv.is_empty());
+    }
   }
 
-  fn choose(&mut self, index: u8, ch: char) -> Line<'a> {
+  fn new(length: usize, words: &[u32]) -> Self {
+    assert_ne!(words.len(), 0);
+    Self {
+      length: length,
+      words: words.iter().cloned().collect(),
+      cells: (0..length).map(|_| Default::default()).collect(),
+      inventories: (0..length).map(|_| Default::default()).collect(),
+    }
+  }
+
+  fn subset(&mut self, index: u8, filter_set: &[u32], dictionary: &Dictionary) -> Line {
     let mut new = Line {
       length: self.length,
-      words: self
-        .words
-        .iter()
-        .cloned()
-        .filter(|w| w.chars().skip(index as usize).next() == Some(ch.to_ascii_uppercase()))
-        .collect(),
+      words: intersect(&self.words, filter_set),
       cells: self.cells.clone(),
       inventories: self.inventories.clone(),
     };
 
-    new.reset_inventories();
+    new.reset_inventories(dictionary);
     swap(&mut new, self);
     new
   }
@@ -69,43 +115,92 @@ struct Cell {
 }
 
 #[derive(Default)]
-struct Choice<'a> {
+struct Choice {
   cell_index: usize,
-  save_lines: [Line<'a>; 2],
+  save_lines: [Line; 2],
 }
 
-pub struct Crossword<'a> {
+#[derive(Default)]
+pub struct WordIndices {
+  length_words: Vec<Vec<u32>>,
+  //x[length][index][char][]
+  length_index_char_words: Vec<Vec<Vec<Vec<u32>>>>,
+}
+fn ind_mut<T: Default>(v: &mut Vec<T>, i: usize) -> &mut T {
+  if v.len() <= i {
+    v.resize_with(i + 1, Default::default);
+  }
+  &mut v[i]
+}
+fn ind_or_empty<T: Default>(v: &[Vec<T>], i: usize) -> &[T] {
+  if v.len() <= i {
+    return &[];
+  }
+  &v[i][..]
+}
+
+impl WordIndices {
+  pub fn new(dict: &Dictionary) -> Self {
+    let mut ret: Self = Default::default();
+    dict.visit_all(|wi, str| {
+      let len = str.len();
+      ind_mut(&mut ret.length_words, len).push(wi);
+      let index_char_words = ind_mut(&mut ret.length_index_char_words, len);
+      index_char_words.resize_with(len, Default::default);
+      for (char_words, ch) in index_char_words.iter_mut().zip(str.chars()) {
+        if let Some(li) = LetterSet::index(ch) {
+          ind_mut(char_words, li as usize).push(wi);
+        }
+      }
+    });
+    ret
+  }
+
+  fn with_length(&self, length: usize) -> Option<&[u32]> {
+    Some(&self.length_words.get(length)?[..])
+  }
+  fn with_length_char_at(&self, length: usize, ch: char, index: usize) -> Option<&[u32]> {
+    if let Some(li) = LetterSet::index(ch) {
+      Some(
+        &self
+          .length_index_char_words
+          .get(length)?
+          .get(index)?
+          .get(li as usize)?[..],
+      )
+    } else {
+      None
+    }
+  }
+}
+pub struct Crossword {
+  dictionary: Dictionary,
+  word_indices: WordIndices,
   width: usize,
   height: usize,
-  lines: Vec<Line<'a>>,
+  lines: Vec<Line>,
   cells: Vec<Cell>,
-  choices: Vec<Choice<'a>>,
+  choices: Vec<Choice>,
 }
 
-impl<'a> Crossword<'a> {
-  pub fn new(width: usize, height: usize, words: &[&'a str]) -> Self {
-    assert_ne!(words.len(), 0);
-    let mut length_buckets: Vec<Option<Vec<&'a str>>> = vec![];
-    length_buckets.resize(max(width, height), None);
-    length_buckets[width - 1] = Some(vec![]);
-    length_buckets[height - 1] = Some(vec![]);
-    for word in words {
-      let length = word.len();
-      assert_ne!(length, 0);
-      if length > length_buckets.len() {
-        continue;
-      }
-      if let &mut Some(ref mut v) = &mut length_buckets[word.len() - 1] {
-        v.push(word);
-      }
-    }
-    if let &Some(ref v) = &length_buckets[3] {
-      assert_ne!(v.len(), 0);
-    }
-    let line_inits: Vec<Option<Line<'a>>> = length_buckets
+impl Crossword {
+  pub fn new(width: usize, height: usize) -> Result<Self> {
+    let mut store = String::new();
+    let dictionary = english_scrabble_dict()?;
+    let word_indices = WordIndices::new(&dictionary);
+    let mut length_buckets: Vec<bool> = vec![];
+    *ind_mut(&mut length_buckets, width) = true;
+    *ind_mut(&mut length_buckets, height) = true;
+    let line_inits: Vec<Option<Line>> = length_buckets
       .into_iter()
       .enumerate()
-      .map(|(i, b)| b.map(|words| Line::new(i + 1, words)))
+      .map(|(len, b)| {
+        if b {
+          Some(Line::new(len, word_indices.with_length(len).unwrap()))
+        } else {
+          None
+        }
+      })
       .collect();
     let mut cells: Vec<Cell> = vec![];
     for i in 0..height {
@@ -120,7 +215,7 @@ impl<'a> Crossword<'a> {
     let cell_index = |i, j| i * width + j;
     let mut lines = vec![];
     for i in 0..height {
-      let mut line = line_inits[width - 1].clone().unwrap();
+      let mut line = line_inits[width].clone().unwrap();
       for (j, cell) in line.cells.iter_mut().enumerate() {
         let ci = cell_index(i, j);
         *cell = ci as u32;
@@ -130,7 +225,7 @@ impl<'a> Crossword<'a> {
     }
 
     for j in 0..width {
-      let mut line = line_inits[height - 1].clone().unwrap();
+      let mut line = line_inits[height].clone().unwrap();
       for (i, cell) in line.cells.iter_mut().enumerate() {
         let ci = cell_index(i, j);
         *cell = ci as u32;
@@ -138,7 +233,12 @@ impl<'a> Crossword<'a> {
       }
       lines.push(line)
     }
+    for line in &mut lines[..] {
+      line.reset_inventories(&dictionary);
+    }
     let mut ret = Self {
+      dictionary,
+      word_indices,
       width,
       height,
       lines,
@@ -148,7 +248,7 @@ impl<'a> Crossword<'a> {
     for i in 0..ret.cells.len() {
       ret.update_cell(i);
     }
-    ret
+    Ok(ret)
   }
 
   pub fn update_cell(&mut self, index: usize) {
@@ -159,11 +259,18 @@ impl<'a> Crossword<'a> {
     c.char_dist = prod;
   }
 
-  pub fn choose_one(&mut self, used_letters: &mut LetterSet) -> bool {
+  pub fn choose_one(&mut self) -> bool {
+    self.choose_one_except(&mut Default::default())
+  }
+
+  pub fn choose_one_except(&mut self, used_letters: &mut LetterSet) -> bool {
     let cell_index = (0..self.cells.len())
       .filter(|&i| self.cells[i].choice.is_none())
-      .min_by_key(|&i| self.cells[i].char_dist.letter_set().len())
-      .unwrap();
+      .min_by_key(|&i| self.cells[i].char_dist.letter_set().len());
+    if cell_index.is_none() {
+      return false;
+    }
+    let cell_index = cell_index.unwrap();
     let inventory = &self.cells[cell_index].char_dist;
     let mut rng = rand::thread_rng();
     let set = LetterSet::difference(inventory.letter_set(), used_letters);
@@ -177,8 +284,6 @@ impl<'a> Crossword<'a> {
     used_letters.insert(ch);
     let cell = &mut self.cells[cell_index];
     cell.choice = Some(ch);
-    mv(cell.row as i32, cell.col as i32);
-    addch(ch as u32);
     let lines = cell.lines;
     let mut choice = Choice {
       cell_index,
@@ -187,7 +292,14 @@ impl<'a> Crossword<'a> {
     for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
       let line = &mut self.lines[index as usize];
 
-      choice.save_lines[slot] = line.choose(offset, ch);
+      choice.save_lines[slot] = line.subset(
+        offset,
+        self
+          .word_indices
+          .with_length_char_at(line.length, ch, offset as usize)
+          .unwrap(),
+        &self.dictionary,
+      );
       let cells = self.lines[index as usize].cells.clone();
       for lc in cells {
         self.update_cell(lc as usize);
@@ -225,9 +337,10 @@ impl<'a> Crossword<'a> {
       return true;
     }
     let mut used = LetterSet::new();
-    while self.choose_one(&mut used) {
+    while self.choose_one_except(&mut used) {
       *c += 1;
-      if *c % 10000 == 0 {
+      if *c % 4096 == 0 {
+        self.render(0, 0);
         refresh();
       }
       if self.rec(c) {
@@ -237,16 +350,9 @@ impl<'a> Crossword<'a> {
     }
     false
   }
-
-  fn search(&self) -> Vec<String> {
-    // Recursively choose letters by picking a cell (how?), then picking a
-    // letter from the *joint distribution* of the letters possible in that
-    // cell. That is, the product of the two letter inventories.
-    vec![]
-  }
 }
 
-impl<'a> View for Crossword<'a> {
+impl View for Crossword {
   fn interact(&mut self) {
     loop {
       self.render(0, 0);
@@ -261,16 +367,18 @@ impl<'a> View for Crossword<'a> {
           self.rec(&mut i);
         }
         _ => {
-          self.choose_one(&mut Default::default());
+          if !self.choose_one() {
+            addstr("Dead end!");
+          }
         }
       }
     }
   }
-  fn render(&self, x: i32, mut y: i32) {
+  fn render(&self, x: i32, y: i32) {
     let mut height = 0;
     getmaxyx(stdscr(), &mut height, &mut 0);
     for cell in &self.cells {
-      mv(cell.row as i32, cell.col as i32);
+      mv(y + cell.row as i32, x + cell.col as i32);
       match cell.choice {
         Some(ch) => {
           addch(ch as u32);
@@ -280,5 +388,6 @@ impl<'a> View for Crossword<'a> {
         }
       }
     }
+    mv(y + self.height as i32, x + self.width as i32);
   }
 }
