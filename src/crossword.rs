@@ -263,21 +263,32 @@ impl Crossword {
   //pub fn choose_one(&mut self) -> bool { self.choose_one_except(&mut Default::default()) }
 
   pub fn get_next_choices(&self, rng: &mut ThreadRng) -> Option<(usize, Vec<char>)> {
-    (0..self.cells.len())
+    let cell_index = (0..self.cells.len())
       .filter(|&i| self.cells[i].choice.is_none())
-      .min_by_key(|&i| self.cells[i].char_dist.letter_set().len())
-      .map(|cell_index| {
-        let mut inventory: Vec<(char, f32)> = self.cells[cell_index]
-          .char_dist
-          .entries()
-          .map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
-          .collect();
-        inventory.sort_unstable_by(|(_, t1), (_, t2)| t1.partial_cmp(t2).unwrap());
-        (
-          cell_index,
-          inventory.into_iter().map(|(ch, _)| ch).collect(),
-        )
-      })
+      .min_by_key(|&i| self.cells[i].char_dist.letter_set().len());
+    if cell_index.is_none() {
+      return None;
+    }
+    let cell_index = cell_index.unwrap();
+    let inventory = &self.cells[cell_index].char_dist;
+    if inventory.letter_set().is_empty() {
+      return None;
+    }
+
+    let mut inventory: Vec<(char, f32)> = inventory
+      .entries()
+      .map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
+      .collect();
+    let mut inventory: Vec<(char, f32)> = self.cells[cell_index]
+      .char_dist
+      .entries()
+      .map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
+      .collect();
+    inventory.sort_unstable_by(|(_, t1), (_, t2)| t1.partial_cmp(t2).unwrap());
+    Some((
+      cell_index,
+      inventory.into_iter().map(|(ch, _)| ch).collect(),
+    ))
   }
 
   pub fn choose(&mut self, cell_index: usize, ch: char) {
