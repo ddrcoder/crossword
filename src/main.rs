@@ -11,13 +11,10 @@ use ncurses::*;
 use tui::View;
 
 fn main() {
-    let mut crossword = Crossword::new(6, 5).ok().unwrap();
-    //while crossword.choose_one() {}
     initscr();
     clear();
     refresh();
     ncurses::noecho();
     clear();
-    let mut root = crossword;
-    root.interact();
+    Crossword::new(5, 5).ok().unwrap().interact();
 }
