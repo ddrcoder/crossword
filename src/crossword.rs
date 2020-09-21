@@ -277,7 +277,7 @@ impl Crossword {
             .map(|(ch, n)| (ch, n))
             //.map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
             .collect();
-          to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t2));
+          to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t1));
           Choices::Many(cell_index, to_draw.into_iter().map(|(ch, _)| ch).collect())
         }
       }
@@ -362,12 +362,10 @@ impl Crossword {
     match self.get_next_choices(rng) {
       Choices::Failure => {
         *c += 1;
-        /*
         if *c % 0x1000 == 0 {
           self.render(0, 0);
           refresh();
         }
-        */
         false
       }
       Choices::Success => true,
