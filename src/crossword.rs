@@ -266,11 +266,12 @@ impl Crossword {
       0 => Choices::Failure,
       1 => Choices::Single(cell_index, set.chars().next().unwrap()),
       _ => {
-        let mut to_draw: Vec<(char, f32)> = inventory
+        let mut to_draw: Vec<_> = inventory
           .entries()
-          .map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
+          .map(|(ch, n)| (ch, n))
+          //.map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
           .collect();
-        to_draw.sort_unstable_by(|(_, t1), (_, t2)| t1.partial_cmp(t2).unwrap());
+        to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t2));
         Choices::Many(cell_index, to_draw.into_iter().map(|(ch, _)| ch).collect())
       }
     }
@@ -333,9 +334,12 @@ impl Crossword {
     match self.get_next_choices(rng) {
       Choices::Failure => {
         *c += 1;
-        self.render(0, 0);
-        refresh();
-        if *c % 0x1000 == 0 {}
+        /*
+        if *c % 0x1000 == 0 {
+          self.render(0, 0);
+          refresh();
+        }
+        */
         false
       }
       Choices::Success => true,
@@ -344,7 +348,6 @@ impl Crossword {
         if self.rec(c, rng) {
           return true;
         }
-        *c += 1;
         self.undo_one();
         false
       }
@@ -370,6 +373,7 @@ impl View for Crossword {
     let (mut x, mut y) = (0, 0);
     let mut rng = rand::thread_rng();
     let mut downward = false;
+    let mut msg_line = 0;
     loop {
       x = x.clamp(0, self.width as i32 - 1);
       y = y.clamp(0, self.height as i32 - 1);
@@ -394,7 +398,7 @@ impl View for Crossword {
           }
           None
         }
-        ch @ (0x61..=0x79) => {
+        ch @ (0x41..=0x69) | ch @ (0x61..=0x79) => {
           let cell_index = (0..self.cells.len())
             .filter(|ci| {
               let cell = &self.cells[*ci];
@@ -402,7 +406,7 @@ impl View for Crossword {
             })
             .next()
             .unwrap();
-          let ch = ch as char;
+          let ch = (ch as char).to_ascii_uppercase();
           let ret = if let Some(existing) = self.cells[cell_index].choice {
             if existing == ch {
               None
@@ -454,15 +458,21 @@ impl View for Crossword {
           None
         }
         //escape
-        //0x1b => while self.undo_one() {},
-        0x1b => None,
+        0x1b => {
+          while self.undo_one() {}
+          None
+        }
         0x2c => Some(format!("Narrower")),
         0x2e => Some(format!("Wider")),
         0x2d => Some(format!("Shorter")),
         0x3d => Some(format!("Taller")),
         c => Some(format!("Unrecognized char: {:x}", c)),
       };
-      self.cursor(0, self.height as i32 + 2);
+      msg_line += 1;
+      if msg_line == 10 {
+        msg_line = 0;
+      }
+      self.cursor(0, self.height as i32 + 2 + msg_line);
       if let Some(s) = message {
         addstr(&s);
       }

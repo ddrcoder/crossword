@@ -16,5 +16,5 @@ fn main() {
     refresh();
     ncurses::noecho();
     clear();
-    Crossword::new(5, 5).ok().unwrap().interact();
+    Crossword::new(6, 6).ok().unwrap().interact();
 }
