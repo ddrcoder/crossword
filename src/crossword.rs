@@ -330,6 +330,19 @@ impl Crossword {
     }
   }
 
+  fn solve(&mut self, rng: &mut ThreadRng) -> std::result::Result<usize, usize> {
+    let start = std::time::Instant::now();
+    let mut count = 0;
+    if self.rec(&mut count, rng) {
+      let end = std::time::Instant::now();
+      mv(0, 10);
+      addstr(&format!("{}s ", (end - start).as_secs_f32()));
+      Ok(count)
+    } else {
+      Err(count)
+    }
+  }
+
   fn rec(&mut self, c: &mut usize, rng: &mut ThreadRng) -> bool {
     match self.get_next_choices(rng) {
       Choices::Failure => {
@@ -427,15 +440,10 @@ impl View for Crossword {
           }
           ret
         }
-        0x20 => {
-          let mut c = 0;
-          Some(if self.rec(&mut c, &mut rng) {
-            mv(self.height as i32 + 1, 0);
-            format!("Solved in {} steps", c)
-          } else {
-            format!("Unsolvable, tried {} steps", c)
-          })
-        }
+        0x20 => Some(match self.solve(&mut rng) {
+          Ok(steps) => format!("Solved in {} steps", steps),
+          Err(steps) => format!("Unsolvable, tried {} steps", steps),
+        }),
         //left
         0x44 => {
           x -= 1;
