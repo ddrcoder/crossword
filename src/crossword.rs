@@ -1,6 +1,8 @@
+extern crate priority_queue;
 extern crate rand;
 
 use ncurses::*;
+use priority_queue::PriorityQueue;
 use rand::{rngs::ThreadRng, Rng};
 use std::io::Result;
 use std::mem::swap;
@@ -179,6 +181,7 @@ pub struct Crossword {
   lines: Vec<Line>,
   cells: Vec<Cell>,
   choices: Vec<Choice>,
+  tight_cells: PriorityQueue<u32, usize>,
 }
 
 enum Choices {
@@ -237,6 +240,7 @@ impl Crossword {
       lines,
       cells,
       choices: vec![],
+      tight_cells: PriorityQueue::new(),
     };
     for i in 0..ret.cells.len() {
       ret.update_cell(i);
@@ -246,34 +250,39 @@ impl Crossword {
 
   pub fn update_cell(&mut self, index: usize) {
     let c = &mut self.cells[index];
+    if c.choice.is_some() {
+      return;
+    }
     let a = &self.lines[c.lines[0].0 as usize].inventories[c.lines[0].1 as usize];
     let b = &self.lines[c.lines[1].0 as usize].inventories[c.lines[1].1 as usize];
     let prod = LetterInventory::product(a, b);
+    self
+      .tight_cells
+      .push(index as u32, !(prod.letter_set().len() * 1000 + index));
     c.char_dist = prod;
   }
 
   fn get_next_choices(&self, rng: &mut ThreadRng) -> Choices {
-    let cell_index = (0..self.cells.len())
-      .filter(|&i| self.cells[i].choice.is_none())
-      .min_by_key(|&i| self.cells[i].char_dist.letter_set().len());
-    if cell_index.is_none() {
-      return Choices::Success;
-    }
-    let cell_index = cell_index.unwrap();
-    let inventory = &self.cells[cell_index].char_dist;
-    let set = inventory.letter_set();
-    match inventory.letter_set().len() {
-      0 => Choices::Failure,
-      1 => Choices::Single(cell_index, set.chars().next().unwrap()),
-      _ => {
-        let mut to_draw: Vec<_> = inventory
-          .entries()
-          .map(|(ch, n)| (ch, n))
-          //.map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
-          .collect();
-        to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t2));
-        Choices::Many(cell_index, to_draw.into_iter().map(|(ch, _)| ch).collect())
+    if let Some((cell_index, n)) = self.tight_cells.peek() {
+      let cell_index = *cell_index as usize;
+      let inventory = &self.cells[cell_index].char_dist;
+      let set = inventory.letter_set();
+      //println!("cell {} has {}", cell_index, !n);
+      match set.len() {
+        0 => Choices::Failure,
+        1 => Choices::Single(cell_index, inventory.letter_set().chars().next().unwrap()),
+        _ => {
+          let mut to_draw: Vec<_> = inventory
+            .entries()
+            .map(|(ch, n)| (ch, n))
+            //.map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
+            .collect();
+          to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t2));
+          Choices::Many(cell_index, to_draw.into_iter().map(|(ch, _)| ch).collect())
+        }
       }
+    } else {
+      Choices::Success
     }
   }
 
@@ -281,6 +290,11 @@ impl Crossword {
     let cell = &mut self.cells[cell_index];
     if cell.choice != None || cell.char_dist.count(ch) == 0 {
       return false;
+    }
+    if let Some((c, n)) = self.tight_cells.remove(&(cell_index as u32)) {
+      //println!("{} has {} options", c, !n);
+    } else {
+      panic!();
     }
     cell.choice = Some(ch);
     let lines = cell.lines;
@@ -311,6 +325,7 @@ impl Crossword {
   fn undo_one(&mut self) -> bool {
     if let Some(choice) = self.choices.pop() {
       let cell_index = choice.cell_index;
+      //println!("unchoosing cell {}", cell_index);
       let cell = &mut self.cells[cell_index];
       mv(cell.row as i32, cell.col as i32);
       addch('_' as u32);
@@ -330,7 +345,7 @@ impl Crossword {
     }
   }
 
-  fn solve(&mut self, rng: &mut ThreadRng) -> std::result::Result<usize, usize> {
+  pub fn solve(&mut self, rng: &mut ThreadRng) -> std::result::Result<usize, usize> {
     let start = std::time::Instant::now();
     let mut count = 0;
     if self.rec(&mut count, rng) {

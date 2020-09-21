@@ -11,6 +11,8 @@ use ncurses::*;
 use tui::View;
 
 fn main() {
+    let mut rng = rand::thread_rng();
+    //Crossword::new(4, 4).ok().unwrap().solve(&mut rng);
     initscr();
     clear();
     refresh();
