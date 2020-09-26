@@ -5,7 +5,6 @@ use ncurses::*;
 use priority_queue::PriorityQueue;
 use rand::{rngs::ThreadRng, Rng};
 use std::io::Result;
-use std::mem::swap;
 use tui::View;
 use words::dictionary::{english_scrabble_dict, Dictionary};
 use words::{LetterInventory, LetterSet};
@@ -18,6 +17,10 @@ struct Line {
   inventories: Vec<LetterInventory>,
 }
 
+// TODO: Actually make iterator trees, but just:
+//  - WordSet (for leaves)
+//  - Intersect (for constraining)
+//  - Difference (for excluding used)
 fn intersect(mut a: &[u32], mut b: &[u32]) -> Vec<u32> {
   let (a_in, b_in) = (a, b);
   assert!(!a.is_empty());
@@ -62,6 +65,12 @@ mod test_intersect {
   }
 }
 
+enum ConstrainResult {
+  Reduced,
+  Failed,
+  Unique(u32),
+}
+
 impl Line {
   fn reset_inventories(&mut self, dictionary: &Dictionary) {
     for inv in &mut self.inventories {
@@ -92,17 +101,21 @@ impl Line {
     }
   }
 
-  fn subset(&mut self, filter_set: &[u32], dictionary: &Dictionary) -> Line {
-    let mut new = Line {
-      length: self.length,
-      words: intersect(&self.words, filter_set),
-      cells: self.cells.clone(),
-      inventories: self.inventories.clone(),
-    };
+  // TODO: Return ConstrainResult, because this will be able to fail when word
+  // uniqueness is added; TH[IU]S both across and down filling index 2 will try
+  // to double-claim THIS or THUS, and we'll only find it when we try to commit.
+  fn constrain(&mut self, filter_set: &[u32], dictionary: &Dictionary) -> Option<u32> {
+    let count_before = self.words.len();
+    self.words = intersect(&self.words, filter_set);
+    let count_after = self.words.len();
+    self.reset_inventories(dictionary);
+    assert_ne!(count_after, 0);
 
-    new.reset_inventories(dictionary);
-    swap(&mut new, self);
-    new
+    if count_before > 1 && count_after == 1 {
+      Some(self.words[0])
+    } else {
+      None
+    }
   }
 }
 
@@ -126,7 +139,11 @@ pub struct WordIndices {
   length_words: Vec<Vec<u32>>,
   //x[length][index][char][]
   length_index_char_words: Vec<Vec<Vec<Vec<u32>>>>,
+  // We can't just subtract letter sets!
+  // We have to actually exclude the specific words.
+  // NOT: length_index_chars_used: Vec<Vec<Vec<Vec<u32>>>>,
 }
+
 fn ind_mut<T: Default>(v: &mut Vec<T>, i: usize) -> &mut T {
   if v.len() <= i {
     v.resize_with(i + 1, Default::default);
@@ -258,7 +275,8 @@ impl Crossword {
     let prod = LetterInventory::product(a, b);
     self
       .tight_cells
-      .push(index as u32, !(prod.letter_set().len() * 1000 + index));
+      //.push(index as u32, prod.tletter_set().len())
+      .push(index as u32, !prod.total() as usize);
     c.char_dist = prod;
   }
 
@@ -274,7 +292,7 @@ impl Crossword {
         _ => {
           let mut to_draw: Vec<_> = inventory
             .entries()
-            .map(|(ch, n)| (ch, n))
+            .map(|(ch, n)| (ch, n * 1000 + (ch as u32)))
             //.map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
             .collect();
           to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t1));
@@ -305,13 +323,16 @@ impl Crossword {
     for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
       let line = &mut self.lines[index as usize];
 
-      choice.save_lines[slot] = line.subset(
+      choice.save_lines[slot] = line.clone();
+      if let Some(claimed_word) = line.constrain(
         self
           .word_indices
           .with_length_char_at(line.length, ch, offset as usize)
           .unwrap(),
         &self.dictionary,
-      );
+      ) {
+        // TODO: Add this word to a set of used words, part of word_indices.
+      }
       let cells = self.lines[index as usize].cells.clone();
       for lc in cells {
         self.update_cell(lc as usize);
