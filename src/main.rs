@@ -5,6 +5,7 @@ extern crate tui;
 extern crate words;
 
 mod crossword;
+mod skip_iter;
 
 use crossword::Crossword;
 use ncurses::*;
