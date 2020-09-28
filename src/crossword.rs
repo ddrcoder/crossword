@@ -1,6 +1,7 @@
 extern crate priority_queue;
 extern crate rand;
 
+use crate::skip_iter::{and, diff, leaf, SkipIterator};
 use ncurses::*;
 use priority_queue::PriorityQueue;
 use rand::{rngs::ThreadRng, Rng};
@@ -17,56 +18,8 @@ struct Line {
   inventories: Vec<LetterInventory>,
 }
 
-// TODO: Actually make iterator trees, but just:
-//  - WordSet (for leaves)
-//  - Intersect (for constraining)
-//  - Difference (for excluding used)
-fn intersect(mut a: &[u32], mut b: &[u32]) -> Vec<u32> {
-  let (a_in, b_in) = (a, b);
-  assert!(!a.is_empty());
-  assert!(!b.is_empty());
-  if a.len() > b.len() {
-    return intersect(b, a);
-  }
-  let mut ret = vec![];
-  while a.len() != 0 {
-    let av = a[0];
-    a = &a[1..];
-    match b.binary_search(&av) {
-      Ok(bi) => {
-        ret.push(av);
-        b = &b[(bi + 1)..];
-      }
-      Err(bi) => {
-        b = &b[bi..];
-        if b.is_empty() {
-          break;
-        }
-        while !a.is_empty() && a[0] < b[0] {
-          a = &a[1..];
-        }
-      }
-    }
-  }
-  assert!(!ret.is_empty(), "{:?} & {:?}", a_in, b_in);
-  ret
-}
-
-#[cfg(test)]
-mod test_intersect {
-  use super::intersect;
-
-  #[test]
-  fn basic() {
-    assert_eq!(
-      vec![6, 12],
-      intersect(&[2, 4, 6, 8, 10, 12, 14], &[3, 6, 9, 12, 15])
-    );
-  }
-}
-
 enum ConstrainResult {
-  Reduced,
+  Ok,
   Failed,
   Unique(u32),
 }
@@ -76,20 +29,12 @@ impl Line {
     for inv in &mut self.inventories {
       *inv = LetterInventory::new();
     }
-    assert!(!self.words.is_empty());
     let (words, inventories) = (self.words.iter().cloned(), &mut self.inventories);
-
-    let mut count = 0;
     dictionary.visit_indices(words, |_, str| {
-      count += 1;
       for (i, ch) in str.chars().enumerate() {
         inventories[i].add(ch);
       }
     });
-    assert_ne!(count, 0);
-    for inv in &mut self.inventories {
-      assert!(!inv.is_empty());
-    }
   }
 
   fn new(length: usize, words: &[u32]) -> Self {
@@ -101,20 +46,30 @@ impl Line {
     }
   }
 
-  // TODO: Return ConstrainResult, because this will be able to fail when word
-  // uniqueness is added; TH[IU]S both across and down filling index 2 will try
-  // to double-claim THIS or THUS, and we'll only find it when we try to commit.
-  fn constrain(&mut self, filter_set: &[u32], dictionary: &Dictionary) -> Option<u32> {
+  fn constrain(
+    &mut self,
+    filter_set: &[u32],
+    claimed_set: &[u32],
+    dictionary: &Dictionary,
+  ) -> ConstrainResult {
     let count_before = self.words.len();
-    self.words = intersect(&self.words, filter_set);
+    if count_before == 1 {
+      //check still 1
+      return ConstrainResult::Ok;
+    }
+
+    self.words = diff(
+      and(leaf(&self.words[..]), leaf(filter_set)),
+      leaf(claimed_set),
+    )
+    .collect();
     let count_after = self.words.len();
     self.reset_inventories(dictionary);
-    assert_ne!(count_after, 0);
-
-    if count_before > 1 && count_after == 1 {
-      Some(self.words[0])
-    } else {
-      None
+    match (count_before, count_after) {
+      (_, 0) => ConstrainResult::Failed,
+      (1, 1) => ConstrainResult::Ok,
+      (_, 1) => ConstrainResult::Unique(self.words[0]),
+      _ => ConstrainResult::Ok,
     }
   }
 }
@@ -129,9 +84,9 @@ struct Cell {
 }
 
 #[derive(Default)]
-struct Choice {
+pub struct Choice {
   cell_index: usize,
-  save_lines: [Line; 2],
+  line_undo: Vec<(u32, Line, Option<u32>)>,
 }
 
 #[derive(Default)]
@@ -139,9 +94,7 @@ pub struct WordIndices {
   length_words: Vec<Vec<u32>>,
   //x[length][index][char][]
   length_index_char_words: Vec<Vec<Vec<Vec<u32>>>>,
-  // We can't just subtract letter sets!
-  // We have to actually exclude the specific words.
-  // NOT: length_index_chars_used: Vec<Vec<Vec<Vec<u32>>>>,
+  length_claimed_words: Vec<Vec<u32>>,
 }
 
 fn ind_mut<T: Default>(v: &mut Vec<T>, i: usize) -> &mut T {
@@ -165,6 +118,7 @@ impl WordIndices {
         }
       }
     });
+    ret.length_claimed_words = vec![vec![]; ret.length_words.len() + 1];
     ret
   }
 
@@ -188,6 +142,28 @@ impl WordIndices {
     } else {
       None
     }
+  }
+  fn claim(&mut self, length: usize, w: u32) {
+    let v = &mut self.length_claimed_words[length];
+    match v[..].binary_search(&w) {
+      Ok(_) => panic!("Already added {}!", w),
+      Err(index) => {
+        v.insert(index, w);
+      }
+    }
+  }
+  fn unclaim(&mut self, length: usize, w: u32) {
+    let v = &mut self.length_claimed_words[length];
+    match v[..].binary_search(&w) {
+      Ok(index) => {
+        v.remove(index);
+      }
+      Err(_) => panic!("{} no claimed!", w),
+    }
+  }
+
+  fn with_length_claimed(&self, length: usize) -> Option<&[u32]> {
+    Some(&(self.length_claimed_words.get(length)?)[..])
   }
 }
 pub struct Crossword {
@@ -257,7 +233,7 @@ impl Crossword {
       lines,
       cells,
       choices: vec![],
-      tight_cells: PriorityQueue::new(),
+      tight_cells: Default::default(),
     };
     for i in 0..ret.cells.len() {
       ret.update_cell(i);
@@ -304,16 +280,12 @@ impl Crossword {
     }
   }
 
-  pub fn choose(&mut self, cell_index: usize, ch: char) -> bool {
+  pub fn choose(&mut self, cell_index: usize, ch: char) -> Option<Choice> {
     let cell = &mut self.cells[cell_index];
     if cell.choice != None || cell.char_dist.count(ch) == 0 {
-      return false;
+      return None;
     }
-    if let Some((c, n)) = self.tight_cells.remove(&(cell_index as u32)) {
-      //println!("{} has {} options", c, !n);
-    } else {
-      panic!();
-    }
+    self.tight_cells.remove(&(cell_index as u32));
     cell.choice = Some(ch);
     let lines = cell.lines;
     let mut choice = Choice {
@@ -323,15 +295,26 @@ impl Crossword {
     for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
       let line = &mut self.lines[index as usize];
 
-      choice.save_lines[slot] = line.clone();
-      if let Some(claimed_word) = line.constrain(
+      let save_line = line.clone();
+      match line.constrain(
         self
           .word_indices
           .with_length_char_at(line.length, ch, offset as usize)
           .unwrap(),
+        self.word_indices.with_length_claimed(line.length).unwrap(),
         &self.dictionary,
       ) {
-        // TODO: Add this word to a set of used words, part of word_indices.
+        ConstrainResult::Unique(claimed) => {
+          choice.line_undo.push((index, save_line, Some(claimed)));
+          self.word_indices.claim(line.length, claimed);
+        }
+        ConstrainResult::Ok => {
+          choice.line_undo.push((index, save_line, None));
+        }
+        ConstrainResult::Failed => {
+          self.undo(choice);
+          return None;
+        }
       }
       let cells = self.lines[index as usize].cells.clone();
       for lc in cells {
@@ -339,27 +322,33 @@ impl Crossword {
       }
     }
 
-    self.choices.push(choice);
-    true
+    Some(choice)
+  }
+
+  fn undo(&mut self, choice: Choice) {
+    let cell_index = choice.cell_index;
+    //println!("unchoosing cell {}", cell_index);
+    let cell = &mut self.cells[cell_index];
+    mv(cell.row as i32, cell.col as i32);
+    addch('_' as u32);
+    cell.choice = None;
+    for (index, saved_line, claimed) in choice.line_undo {
+      let line = &mut self.lines[index as usize];
+      *line = saved_line;
+      let cells = line.cells.clone();
+      let length = line.length;
+      for lc in cells {
+        self.update_cell(lc as usize);
+      }
+      if let Some(claimed) = claimed {
+        self.word_indices.unclaim(length, claimed);
+      }
+    }
   }
 
   fn undo_one(&mut self) -> bool {
     if let Some(choice) = self.choices.pop() {
-      let cell_index = choice.cell_index;
-      //println!("unchoosing cell {}", cell_index);
-      let cell = &mut self.cells[cell_index];
-      mv(cell.row as i32, cell.col as i32);
-      addch('_' as u32);
-      cell.choice = None;
-      let lines = cell.lines;
-      self.lines[lines[0].0 as usize] = choice.save_lines[0].clone();
-      self.lines[lines[1].0 as usize] = choice.save_lines[1].clone();
-      for (index, _) in &lines[..] {
-        let cells = self.lines[*index as usize].cells.clone();
-        for lc in cells {
-          self.update_cell(lc as usize);
-        }
-      }
+      self.undo(choice);
       true
     } else {
       false
@@ -391,20 +380,22 @@ impl Crossword {
       }
       Choices::Success => true,
       Choices::Single(cell_index, ch) => {
-        assert!(self.choose(cell_index, ch));
-        if self.rec(c, rng) {
-          return true;
+        if let Some(choice) = self.choose(cell_index, ch) {
+          if self.rec(c, rng) {
+            return true;
+          }
+          self.undo(choice);
         }
-        self.undo_one();
         false
       }
       Choices::Many(cell_index, chars) => {
         for ch in chars {
-          assert!(self.choose(cell_index, ch));
-          if self.rec(c, rng) {
-            return true;
+          if let Some(choice) = self.choose(cell_index, ch) {
+            if self.rec(c, rng) {
+              return true;
+            }
+            self.undo(choice);
           }
-          self.undo_one();
         }
         false
       }
@@ -460,7 +451,8 @@ impl View for Crossword {
             } else {
               Some(format!("Already filled (backspace it)"))
             }
-          } else if self.choose(cell_index, ch) {
+          } else if let Some(choice) = self.choose(cell_index, ch) {
+            self.choices.push(choice);
             None
           } else {
             Some(format!("That's a dead end."))

@@ -36,7 +36,26 @@ impl<'a, T: Ord + Copy> Iterator for Leaf<'a, T> {
     }
 }
 
-impl<'a, T: Ord + Copy> SkipIterator for Leaf<'a, T> {}
+impl<'a, T: Ord + Copy> SkipIterator for Leaf<'a, T> {
+    fn lower_bound_next(&mut self, min_id: T) -> Option<Self::Item> {
+        match self.slice.binary_search(&min_id) {
+            Ok(index) => {
+                self.slice = &self.slice[index + 1..];
+                Some(min_id)
+            }
+            Err(index) => {
+                if index >= self.slice.len() {
+                    self.slice = &[];
+                    None
+                } else {
+                    let ret = self.slice[index];
+                    self.slice = &self.slice[index + 1..];
+                    Some(ret)
+                }
+            }
+        }
+    }
+}
 
 // -------------------- and --------------------
 struct And<T: Ord + Copy, A: SkipIterator<Item = T>, B: SkipIterator<Item = T>> {
@@ -165,6 +184,48 @@ impl<T: Ord + Copy, A: SkipIterator<Item = T>, B: SkipIterator<Item = T>> SkipIt
     fn lower_bound_next(&mut self, min_id: Self::Item) -> Option<Self::Item> {
         if let Some(id) = self.a.lower_bound_next(min_id) {
             if self.should_skip(id) {
+                self.next()
+            } else {
+                Some(id)
+            }
+        } else {
+            None
+        }
+    }
+}
+
+struct Filter<T: Ord + Copy, F: FnMut(T) -> bool, Base: SkipIterator<Item = T>> {
+    base: Base,
+    filter: F,
+}
+
+pub fn filter_<T: Ord + Copy, F: FnMut(T) -> bool, Base: SkipIterator<Item = T>>(
+    base: Base,
+    filter: F,
+) -> impl SkipIterator<Item = T> {
+    Filter { base, filter }
+}
+
+impl<T: Ord + Copy, F: FnMut(T) -> bool, Base: SkipIterator<Item = T>> Iterator
+    for Filter<T, F, Base>
+{
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(id) = self.base.next() {
+            if (self.filter)(id) {
+                return Some(id);
+            }
+        }
+        None
+    }
+}
+
+impl<T: Ord + Copy, F: FnMut(T) -> bool, Base: SkipIterator<Item = T>> SkipIterator
+    for Filter<T, F, Base>
+{
+    fn lower_bound_next(&mut self, min_id: Self::Item) -> Option<Self::Item> {
+        if let Some(id) = self.base.lower_bound_next(min_id) {
+            if !(self.filter)(id) {
                 self.next()
             } else {
                 Some(id)
