@@ -1,4 +1,7 @@
-use std::iter::Iterator;
+use std::{
+    cmp::{Ord, Ordering},
+    iter::Iterator,
+};
 
 pub trait SkipIterator: Iterator
 where
@@ -15,11 +18,33 @@ where
 }
 
 // -------------------- leaf --------------------
+struct ShortLeaf<'a, T: Ord + Copy> {
+    slice: &'a [T],
+}
+
+pub fn short_leaf<'a>(slice: &'a [u32]) -> impl SkipIterator<Item = u32> + 'a {
+    //impl SkipIterator + 'a {
+    ShortLeaf { slice }
+}
+
+impl<'a, T: Ord + Copy> Iterator for ShortLeaf<'a, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        if let Some((head, tail)) = self.slice.split_first() {
+            self.slice = tail;
+            Some(*head)
+        } else {
+            None
+        }
+    }
+}
+impl<'a> SkipIterator for ShortLeaf<'a, u32> {}
+// -------------------- leaf --------------------
 struct Leaf<'a, T: Ord + Copy> {
     slice: &'a [T],
 }
 
-pub fn leaf<'a, T: Ord + Copy>(slice: &'a [T]) -> impl SkipIterator<Item = T> + 'a {
+pub fn leaf<'a>(slice: &'a [u32]) -> impl SkipIterator<Item = u32> + 'a {
     //impl SkipIterator + 'a {
     Leaf { slice }
 }
@@ -36,6 +61,78 @@ impl<'a, T: Ord + Copy> Iterator for Leaf<'a, T> {
     }
 }
 
+impl<'a> SkipIterator for Leaf<'a, u32> {
+    fn lower_bound_next(&mut self, min_id: u32) -> Option<Self::Item> {
+        match self.slice.binary_search(&min_id) {
+            Ok(index) => {
+                self.slice = &self.slice[index + 1..];
+                Some(min_id)
+            }
+            Err(index) => {
+                if index >= self.slice.len() {
+                    self.slice = &[];
+                    None
+                } else {
+                    let ret = self.slice[index];
+                    self.slice = &self.slice[index + 1..];
+                    Some(ret)
+                }
+            }
+        }
+        /*
+        if self.slice.is_empty() {
+            return None;
+        }
+        let mut lo = 0;
+        let mut lo_id = self.slice[lo];
+        if lo_id >= min_id {
+            self.slice = &self.slice[lo + 1..];
+            return Some(lo_id);
+        }
+        let mut hi = self.slice.len() - 1;
+        let mut hi_id = self.slice[hi];
+        if hi_id < min_id {
+            self.slice = &self.slice[hi + 1..];
+            return None;
+        }
+        while hi > lo {
+            let mid = lo + (min_id - lo_id) as usize * (hi - lo) / (hi_id - lo_id) as usize;
+            let mut mid_id: u32 = self.slice[mid];
+            let stop = match mid_id.cmp(&min_id) {
+                Ordering::Greater => {
+                    hi = mid - 1;
+                    hi_id = self.slice[hi];
+                    if hi_id < min_id {
+                        Some((mid, mid_id))
+                    } else {
+                        None
+                    }
+                }
+                Ordering::Less => {
+                    lo = mid + 1;
+                    lo_id = self.slice[lo];
+                    if lo_id >= min_id {
+                        Some((lo, lo_id))
+                    } else {
+                        None
+                    }
+                }
+                Ordering::Equal => Some((mid, mid_id)),
+            };
+            if let Some((index, id)) = stop {
+                assert!(id >= min_id);
+                self.slice = &self.slice[index + 1..];
+                return Some(id);
+            }
+        }
+        let ret: u32 = self.slice[lo as usize];
+        self.slice = &self.slice[lo as usize + 1..];
+        Some(ret)
+        */
+    }
+}
+
+/*
 impl<'a, T: Ord + Copy> SkipIterator for Leaf<'a, T> {
     fn lower_bound_next(&mut self, min_id: T) -> Option<Self::Item> {
         match self.slice.binary_search(&min_id) {
@@ -55,7 +152,7 @@ impl<'a, T: Ord + Copy> SkipIterator for Leaf<'a, T> {
             }
         }
     }
-}
+}*/
 
 // -------------------- and --------------------
 struct And<T: Ord + Copy, A: SkipIterator<Item = T>, B: SkipIterator<Item = T>> {
@@ -259,10 +356,19 @@ mod test_skip_iterators {
 
     #[test]
     fn test_diff() {
-        let diff = diff(
-            leaf(&[2, 3, 5, 7, 11, 13, 17]),
-            leaf(&[6, 7, 8, 9, 10, 11, 12]),
+        assert_eq!(
+            vec![2, 3, 5, 13, 17],
+            diff(
+                leaf(&[2, 3, 5, 7, 11, 13, 17]),
+                leaf(&[6, 7, 8, 9, 10, 11, 12]),
+            )
+            .collect::<Vec<_>>()
         );
-        assert_eq!(vec![2, 3, 5, 13, 17], diff.collect::<Vec<_>>());
+        assert!(diff(leaf(&[2, 3, 5]), leaf(&[1, 2, 3, 4, 5, 6]),)
+            .next()
+            .is_none());
+        assert!(diff(leaf(&[2]), diff(leaf(&[1, 2]), leaf(&[])))
+            .next()
+            .is_none());
     }
 }

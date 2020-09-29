@@ -12,6 +12,10 @@ use ncurses::*;
 use tui::View;
 
 fn main() {
+    Crossword::new(6, 6)
+        .ok()
+        .unwrap()
+        .solve(&mut rand::thread_rng());
     initscr();
     clear();
     refresh();

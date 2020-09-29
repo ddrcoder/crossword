@@ -1,7 +1,7 @@
 extern crate priority_queue;
 extern crate rand;
 
-use crate::skip_iter::{and, diff, leaf, SkipIterator};
+use crate::skip_iter::{and, diff, leaf, short_leaf};
 use ncurses::*;
 use priority_queue::PriorityQueue;
 use rand::{rngs::ThreadRng, Rng};
@@ -16,6 +16,7 @@ struct Line {
   words: Vec<u32>,
   cells: Vec<u32>,
   inventories: Vec<LetterInventory>,
+  claimed: Option<u32>,
 }
 
 enum ConstrainResult {
@@ -43,6 +44,7 @@ impl Line {
       words: words.iter().cloned().collect(),
       cells: (0..length).map(|_| Default::default()).collect(),
       inventories: (0..length).map(|_| Default::default()).collect(),
+      claimed: None,
     }
   }
 
@@ -53,22 +55,36 @@ impl Line {
     dictionary: &Dictionary,
   ) -> ConstrainResult {
     let count_before = self.words.len();
-    if count_before == 1 {
-      //check still 1
-      return ConstrainResult::Ok;
-    }
+    let mut claimed_word = [0];
+    let claimed_word = if let Some(claimed) = self.claimed {
+      claimed_word[0] = claimed;
+      &claimed_word[0..1]
+    } else {
+      &claimed_word[0..0]
+    };
+    self.words = if self.words.len() < 256 {
+      diff(
+        and(short_leaf(&self.words[..]), leaf(filter_set)),
+        diff(short_leaf(claimed_set), short_leaf(claimed_word)),
+      )
+      .collect()
+    } else {
+      diff(
+        and(leaf(&self.words[..]), leaf(filter_set)),
+        diff(short_leaf(claimed_set), short_leaf(claimed_word)),
+      )
+      .collect()
+    };
 
-    self.words = diff(
-      and(leaf(&self.words[..]), leaf(filter_set)),
-      leaf(claimed_set),
-    )
-    .collect();
     let count_after = self.words.len();
     self.reset_inventories(dictionary);
     match (count_before, count_after) {
       (_, 0) => ConstrainResult::Failed,
       (1, 1) => ConstrainResult::Ok,
-      (_, 1) => ConstrainResult::Unique(self.words[0]),
+      (_, 1) => {
+        self.claimed = Some(self.words[0]);
+        ConstrainResult::Unique(self.words[0])
+      }
       _ => ConstrainResult::Ok,
     }
   }
@@ -147,6 +163,7 @@ impl WordIndices {
     let v = &mut self.length_claimed_words[length];
     match v[..].binary_search(&w) {
       Ok(_) => panic!("Already added {}!", w),
+
       Err(index) => {
         v.insert(index, w);
       }
