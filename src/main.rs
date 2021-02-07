@@ -1,4 +1,3 @@
-#![feature(clamp)]
 extern crate ncurses;
 extern crate time;
 extern crate tui;

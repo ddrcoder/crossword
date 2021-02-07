@@ -420,6 +420,16 @@ impl Crossword {
   }
 }
 
+fn clamp(lo: i32, mid: i32, hi: i32) -> i32 {
+  if mid < lo {
+    lo
+  } else if mid > hi {
+    hi
+  } else {
+    mid
+  }
+}
+
 impl View for Crossword {
   fn cursor(&self, x: i32, y: i32) {
     mv(y, x);
@@ -430,8 +440,8 @@ impl View for Crossword {
     let mut downward = false;
     let mut msg_line = 0;
     loop {
-      x = x.clamp(0, self.width as i32 - 1);
-      y = y.clamp(0, self.height as i32 - 1);
+      x = clamp(0, x, self.width as i32 - 1);
+      y = clamp(0, y, self.height as i32 - 1);
       self.render(0, 0);
       if self.choices.len() == self.height * self.width {
         self.cursor(self.width as i32, self.height as i32);
@@ -453,7 +463,8 @@ impl View for Crossword {
           }
           None
         }
-        ch @ (0x41..=0x69) | ch @ (0x61..=0x79) => {
+        //ch @ (0x41..=0x69) |
+        ch @ (0x61..=0x79) => {
           let cell_index = (0..self.cells.len())
             .filter(|ci| {
               let cell = &self.cells[*ci];
