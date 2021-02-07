@@ -5,6 +5,7 @@ use crate::skip_iter::{and, diff, leaf, short_leaf};
 use ncurses::*;
 use priority_queue::PriorityQueue;
 use rand::{rngs::ThreadRng, Rng};
+use std::collections::hash_set::HashSet;
 use std::io::Result;
 use tui::View;
 use words::dictionary::{english_scrabble_dict, Dictionary};
@@ -398,9 +399,11 @@ impl Crossword {
       Choices::Success => true,
       Choices::Single(cell_index, ch) => {
         if let Some(choice) = self.choose(cell_index, ch) {
+          self.choices.push(choice);
           if self.rec(c, rng) {
             return true;
           }
+          let choice = self.choices.pop().unwrap();
           self.undo(choice);
         }
         false
@@ -408,15 +411,68 @@ impl Crossword {
       Choices::Many(cell_index, chars) => {
         for ch in chars {
           if let Some(choice) = self.choose(cell_index, ch) {
+            self.choices.push(choice);
             if self.rec(c, rng) {
               return true;
             }
+            let choice = self.choices.pop().unwrap();
             self.undo(choice);
           }
         }
         false
       }
     }
+  }
+
+  fn prefilter(&mut self) -> f64 {
+    let mut lines_to_update: HashSet<_> = (0..self.lines.len()).collect();
+    let mut reduction = 1.;
+    while !lines_to_update.is_empty() {
+      let mut touched_lines = HashSet::new();
+      for l in lines_to_update {
+        let line = &self.lines[l];
+        let mut new_words = vec![];
+        new_words.reserve(line.words.len());
+        self
+          .dictionary
+          .visit_indices(line.words.iter().cloned(), |w, str| {
+            let mut bad_letters = str.chars().enumerate().filter(|(i, ch)| {
+              let cell_index = line.cells[*i] as usize;
+              let cell: &Cell = &self.cells[cell_index];
+              let other_inventories = cell.lines[..].iter().filter_map(|(l2, i2)| {
+                if *l2 as usize == l {
+                  None
+                } else {
+                  Some(&self.lines[*l2 as usize].inventories[*i2 as usize])
+                }
+              });
+
+              let mut conflicts = other_inventories.filter(|inv| inv.count(*ch) == 0);
+              conflicts.next().is_some()
+            });
+            if let None = bad_letters.next() {
+              new_words.push(w);
+            }
+          });
+        if new_words.len() != line.words.len() {
+          reduction *= line.words.len() as f64 / new_words.len() as f64;
+          let (line, dictionary) = (&mut self.lines[l], &self.dictionary);
+          line.words = new_words;
+          line.reset_inventories(&dictionary);
+          touched_lines.insert(l);
+        }
+      }
+      lines_to_update = touched_lines;
+    }
+    reduction
+  }
+
+  fn naive_solution_count(&self) -> f64 {
+    self
+      .lines
+      .iter()
+      .map(|line| line.words.len() as f64)
+      .product()
   }
 }
 
@@ -448,11 +504,13 @@ impl View for Crossword {
       } else {
         self.cursor(x, y);
       }
-      let message: Option<String> = match getch() as u8 {
+      let input = getch() as u8;
+      let message: Option<String> = match input as u8 {
         0x9 => {
           downward = !downward;
           None
         }
+        0x5c => Some(format!("{}x reduction", self.prefilter())),
         0x7f => {
           // backspace
           if let Some(choice) = self.choices.last() {
@@ -460,8 +518,10 @@ impl View for Crossword {
             x = cell.col as i32;
             y = cell.row as i32;
             self.undo_one();
+            Some(format!("undoing one"))
+          } else {
+            Some(format!("nothing to undo!"))
           }
-          None
         }
         //ch @ (0x41..=0x69) |
         ch @ (0x61..=0x79) => {
@@ -481,7 +541,7 @@ impl View for Crossword {
             }
           } else if let Some(choice) = self.choose(cell_index, ch) {
             self.choices.push(choice);
-            None
+            Some(format!("{} added!", ch))
           } else {
             Some(format!("That's a dead end."))
           };
@@ -495,40 +555,56 @@ impl View for Crossword {
           ret
         }
         0x20 => Some(match self.solve(&mut rng) {
-          Ok(steps) => format!("Solved in {} steps", steps),
+          Ok(steps) => format!(
+            "Solved in {} steps with {} choices",
+            steps,
+            self.choices.len()
+          ),
           Err(steps) => format!("Unsolvable, tried {} steps", steps),
         }),
-        //left
-        0x44 => {
-          x -= 1;
-          None
-        }
-        //right
-        0x43 => {
-          x += 1;
-          None
-        }
-        0x5b => None,
-        //up
-        0x41 => {
-          y -= 1;
-          None
-        }
-        //down
-        0x42 => {
-          y += 1;
+        0x60 => {
+          while self.undo_one() {}
           None
         }
         //escape
         0x1b => {
-          while self.undo_one() {}
-          None
+          let input2 = getch() as u8;
+          match input2 {
+            0x5b => {
+              let input3 = getch() as u8;
+              match input3 {
+                //left
+                0x44 => {
+                  x -= 1;
+                  None
+                }
+                //right
+                0x43 => {
+                  x += 1;
+                  None
+                }
+                0x5b => None,
+                //up
+                0x41 => {
+                  y -= 1;
+                  None
+                }
+                //down
+                0x42 => {
+                  y += 1;
+                  None
+                }
+                _ => Some(format!("{:x}, {:x}", input2, input3)),
+              }
+            }
+            _ => Some(format!("{:x}", input2)),
+          }
         }
         0x2c => Some(format!("Narrower")),
         0x2e => Some(format!("Wider")),
         0x2d => Some(format!("Shorter")),
         0x3d => Some(format!("Taller")),
-        c => Some(format!("Unrecognized char: {:x}", c)),
+        c => Some(format!("Unrecognized")),
       };
       msg_line += 1;
       if msg_line == 10 {
@@ -536,7 +612,9 @@ impl View for Crossword {
       }
       self.cursor(0, self.height as i32 + 2 + msg_line);
       if let Some(s) = message {
-        addstr(&s);
+        addstr(&format!("{:x}: {}", input, s));
+      } else {
+        addstr(&format!("{:x}: {} choices", input, self.choices.len()));
       }
       addstr("                         ");
       refresh();
@@ -546,6 +624,11 @@ impl View for Crossword {
   fn render(&self, x: i32, y: i32) {
     let mut height = 0;
     getmaxyx(stdscr(), &mut height, &mut 0);
+    mv(1, 10);
+    addstr(&format!(
+      "{} solutions seem to remain.                                                           ",
+      self.naive_solution_count()
+    ));
     for cell in &self.cells {
       mv(y + cell.row as i32, x + cell.col as i32);
       match cell.choice {
