@@ -1,569 +1,503 @@
 extern crate priority_queue;
 extern crate rand;
 
-use crate::skip_iter::{and, diff, leaf, short_leaf};
 use ncurses::*;
-use priority_queue::PriorityQueue;
 use rand::{rngs::ThreadRng, Rng};
 use std::collections::hash_set::HashSet;
-use std::io::Result;
+use std::collections::HashMap;
+use std::rc::Rc;
 use tui::View;
 use words::dictionary::{english_scrabble_dict, Dictionary};
-use words::{LetterInventory, LetterSet};
+use words::LetterSet;
 
 #[derive(Clone, Debug, Default)]
 struct Line {
-  length: usize,
-  words: Vec<u32>,
-  cells: Vec<u32>,
-  inventories: Vec<LetterInventory>,
-  claimed: Option<u32>,
-}
-
-enum ConstrainResult {
-  Ok,
-  Failed,
-  Unique(u32),
+  direction: u8,
+  cell_indices: Vec<u32>,
 }
 
 impl Line {
-  fn reset_inventories(&mut self, dictionary: &Dictionary) {
-    for inv in &mut self.inventories {
-      *inv = LetterInventory::new();
-    }
-    let (words, inventories) = (self.words.iter().cloned(), &mut self.inventories);
-    dictionary.visit_indices(words, |_, str| {
-      for (i, ch) in str.chars().enumerate() {
-        inventories[i].add(ch);
-      }
-    });
+  fn length(&self) -> usize {
+    self.cell_indices.len()
   }
+}
 
-  fn new(length: usize, words: &[u32]) -> Self {
-    Self {
-      length: length,
-      words: words.iter().cloned().collect(),
-      cells: (0..length).map(|_| Default::default()).collect(),
-      inventories: (0..length).map(|_| Default::default()).collect(),
-      claimed: None,
+#[derive(Clone, Debug, Default)]
+struct LineState {
+  // Length for this set is implied by length of position_letters.
+  position_letters: Vec<LetterSet>,
+  ords: Vec<u8>,
+}
+
+impl LineState {
+  fn new(length: usize) -> LineState {
+    LineState {
+      position_letters: vec![Default::default(); length],
+      ords: vec![],
     }
   }
 
-  fn constrain(
-    &mut self,
-    filter_set: &[u32],
-    claimed_set: &[u32],
-    dictionary: &Dictionary,
-  ) -> ConstrainResult {
-    let count_before = self.words.len();
-    let mut claimed_word = [0];
-    let claimed_word = if let Some(claimed) = self.claimed {
-      claimed_word[0] = claimed;
-      &claimed_word[0..1]
-    } else {
-      &claimed_word[0..0]
-    };
-    self.words = if self.words.len() < 256 {
-      diff(
-        and(short_leaf(&self.words[..]), leaf(filter_set)),
-        diff(short_leaf(claimed_set), short_leaf(claimed_word)),
-      )
-      .collect()
-    } else {
-      diff(
-        and(leaf(&self.words[..]), leaf(filter_set)),
-        diff(short_leaf(claimed_set), short_leaf(claimed_word)),
-      )
-      .collect()
-    };
+  fn length(&self) -> usize {
+    self.position_letters.len()
+  }
 
-    let count_after = self.words.len();
-    self.reset_inventories(dictionary);
-    match (count_before, count_after) {
-      (_, 0) => ConstrainResult::Failed,
-      (1, 1) => ConstrainResult::Ok,
-      (_, 1) => {
-        self.claimed = Some(self.words[0]);
-        ConstrainResult::Unique(self.words[0])
-      }
-      _ => ConstrainResult::Ok,
+  fn word(&self, w: usize) -> &[u8] {
+    let n = self.length();
+    let b = w * n;
+    let e = b + n;
+    &self.ords[b..e]
+  }
+
+  fn word_count(&self) -> usize {
+    self.ords.len() / self.length()
+  }
+
+  fn add(&mut self, w: &str) {
+    self.ords.len();
+    let new_len = self.ords.len() + self.length();
+    self.ords.reserve(self.length());
+    let (ords, sets) = (&mut self.ords, &mut self.position_letters);
+    for (o, set) in w.chars().map(LetterSet::index).zip(sets.iter_mut()) {
+      let o = o.unwrap();
+      set.insert_index(o);
+      ords.push(o);
+    }
+    assert_eq!(new_len, self.ords.len());
+  }
+
+  fn add_ords(&mut self, w: &[u8]) {
+    self.ords.reserve(w.len());
+    let (ords, sets) = (&mut self.ords, &mut self.position_letters);
+    for (o, set) in w.iter().zip(sets.iter_mut()) {
+      let o = *o;
+      set.insert_index(o);
+      ords.push(o);
     }
   }
-}
 
-#[derive(Default)]
-struct Cell {
-  row: usize,
-  col: usize,
-  lines: [(u32, u8); 2],
-  choice: Option<char>,
-  char_dist: LetterInventory,
-}
-
-#[derive(Default)]
-pub struct Choice {
-  cell_index: usize,
-  line_undo: Vec<(u32, Line, Option<u32>)>,
-}
-
-#[derive(Default)]
-pub struct WordIndices {
-  length_words: Vec<Vec<u32>>,
-  //x[length][index][char][]
-  length_index_char_words: Vec<Vec<Vec<Vec<u32>>>>,
-  length_claimed_words: Vec<Vec<u32>>,
-}
-
-fn ind_mut<T: Default>(v: &mut Vec<T>, i: usize) -> &mut T {
-  if v.len() <= i {
-    v.resize_with(i + 1, Default::default);
-  }
-  &mut v[i]
-}
-
-impl WordIndices {
-  pub fn new(dict: &Dictionary) -> Self {
-    let mut ret: Self = Default::default();
-    dict.visit_all(|wi, str| {
-      let len = str.len();
-      ind_mut(&mut ret.length_words, len).push(wi);
-      let index_char_words = ind_mut(&mut ret.length_index_char_words, len);
-      index_char_words.resize_with(len, Default::default);
-      for (char_words, ch) in index_char_words.iter_mut().zip(str.chars()) {
-        if let Some(li) = LetterSet::index(ch) {
-          ind_mut(char_words, li as usize).push(wi);
-        }
+  fn with_chosen(&self, ord: u8, pos: u8) -> LineState {
+    let mut ret = LineState::new(self.length());
+    for i in 0..self.word_count() {
+      let word = self.word(i);
+      if word[pos as usize] == ord {
+        ret.add_ords(word);
       }
-    });
-    ret.length_claimed_words = vec![vec![]; ret.length_words.len() + 1];
+    }
     ret
   }
+}
 
-  fn max_length(&self) -> usize {
-    self.length_words.len() - 1
+#[derive(Clone, Debug, Default)]
+struct Cell {
+  lines: [(u32, u8); 2],
+}
+
+struct Puzzle {
+  lines: Vec<Line>,
+  cells: Vec<Cell>,
+  cell_positions: Vec<(usize, usize)>,
+}
+
+impl Puzzle {
+  fn new(grid: &Grid) -> Puzzle {
+    let cell_count = grid.squares.len();
+    let cell_indices = 0..grid.squares.len();
+    let cell_positions: Vec<_> = grid.squares.keys().cloned().collect();
+    let loc_to_ci: HashMap<_, _> = cell_positions
+      .iter()
+      .cloned()
+      .zip(cell_indices.clone())
+      .collect();
+    let mut cells: Vec<Cell> = vec![Default::default(); cell_count];
+    let mut lines = vec![];
+    for ci in cell_indices.clone() {
+      let (x, y) = cell_positions[ci];
+      if !loc_to_ci.contains_key(&(x - 1, y)) {
+        lines.push(Line {
+          direction: 0,
+          cell_indices: (0..)
+            .map(|i| loc_to_ci.get(&(x + i, y)))
+            .take_while(|ci| ci.is_some())
+            .map(|ci| *ci.unwrap() as u32)
+            .collect(),
+        });
+      }
+    }
+    for ci in cell_indices.clone() {
+      let (x, y) = cell_positions[ci];
+      if !loc_to_ci.contains_key(&(x, y - 1)) {
+        lines.push(Line {
+          direction: 1,
+          cell_indices: (0..)
+            .map(|i| loc_to_ci.get(&(x, y + i)))
+            .take_while(|ci| ci.is_some())
+            .map(|ci| *ci.unwrap() as u32)
+            .collect(),
+        });
+      }
+    }
+    for (li, line) in lines.iter().cloned().enumerate() {
+      for (pos, ci) in line.cell_indices.iter().cloned().enumerate() {
+        cells[ci as usize].lines[line.direction as usize] = (li as u32, pos as u8);
+      }
+    }
+    Puzzle {
+      lines,
+      cells,
+      cell_positions,
+    }
+  }
+}
+
+enum SolveResult {
+  None,
+  Incomplete(Vec<(usize, char)>),
+  Solution(Vec<(usize, char)>),
+}
+
+#[derive(Clone)]
+struct Solver<'a> {
+  puzzle: &'a Puzzle,
+  line_states: Vec<Rc<LineState>>,
+}
+
+impl<'a> Solver<'a> {
+  fn new(puzzle: &'a Puzzle, dictionary: &Dictionary) -> Solver<'a> {
+    let lengths: HashSet<_> = puzzle.lines.iter().map(|l| l.length()).collect();
+    let mut line_state_templates: HashMap<usize, LineState> = lengths
+      .into_iter()
+      .map(|l| (l, LineState::new(l)))
+      .collect();
+    dictionary.visit_all(|_, s: &str| {
+      if let Some(line) = line_state_templates.get_mut(&s.len()) {
+        line.add(s);
+      }
+    });
+    let line_state_templates: HashMap<usize, Rc<LineState>> = line_state_templates
+      .into_iter()
+      .map(|(k, v)| (k, Rc::from(v)))
+      .collect();
+    Solver {
+      puzzle,
+      line_states: puzzle
+        .lines
+        .iter()
+        .map(|line| line_state_templates.get(&line.length()).unwrap().clone())
+        .collect(),
+    }
   }
 
-  fn with_length(&self, length: usize) -> &[u32] {
-    &self.length_words[length][..]
+  fn max_permutations(&self) -> f64 {
+    self
+      .line_states
+      .iter()
+      .map(|line| line.word_count() as f64)
+      .product()
   }
 
-  fn with_length_char_at(&self, length: usize, ch: char, index: usize) -> Option<&[u32]> {
-    if let Some(li) = LetterSet::index(ch) {
-      Some(
-        &self
-          .length_index_char_words
-          .get(length)?
-          .get(index)?
-          .get(li as usize)?[..],
-      )
+  fn cell_set(&self, ci: usize) -> LetterSet {
+    let cell = &self.puzzle.cells[ci];
+    let lis = &cell.lines;
+    LetterSet::intersect(
+      &self.line_states[lis[0].0 as usize].position_letters[lis[0].1 as usize],
+      &self.line_states[lis[1].0 as usize].position_letters[lis[1].1 as usize],
+    )
+  }
+
+  fn solved_char(&self, ci: usize) -> Option<char> {
+    let cell = &self.puzzle.cells[ci];
+    let lis = &cell.lines;
+    let s1 = &self.line_states[lis[0].0 as usize].position_letters[lis[0].1 as usize];
+    let s2 = &self.line_states[lis[1].0 as usize].position_letters[lis[1].1 as usize];
+    let s = LetterSet::intersect(&s1, &s2);
+    //assert_eq!(s1, s2);
+    if s.len() == 1 {
+      s.chars().next()
     } else {
       None
     }
   }
-  fn claim(&mut self, length: usize, w: u32) {
-    let v = &mut self.length_claimed_words[length];
-    match v[..].binary_search(&w) {
-      Ok(_) => panic!("Already added {}!", w),
 
-      Err(index) => {
-        v.insert(index, w);
-      }
-    }
-  }
-  fn unclaim(&mut self, length: usize, w: u32) {
-    let v = &mut self.length_claimed_words[length];
-    match v[..].binary_search(&w) {
-      Ok(index) => {
-        v.remove(index);
-      }
-      Err(_) => panic!("{} no claimed!", w),
-    }
-  }
-
-  fn with_length_claimed(&self, length: usize) -> Option<&[u32]> {
-    Some(&(self.length_claimed_words.get(length)?)[..])
-  }
-}
-pub struct Crossword {
-  dictionary: Dictionary,
-  word_indices: WordIndices,
-  width: usize,
-  height: usize,
-  lines: Vec<Line>,
-  cells: Vec<Cell>,
-  choices: Vec<Choice>,
-  tight_cells: PriorityQueue<u32, usize>,
-}
-
-enum Choices {
-  Failure,
-  Success,
-  Single(usize, char),
-  Many(usize, Vec<char>),
-}
-
-impl Crossword {
-  pub fn new(width: usize, height: usize) -> Result<Self> {
-    let dictionary = english_scrabble_dict()?;
-    let word_indices = WordIndices::new(&dictionary);
-    let line_inits: Vec<Line> = (0..word_indices.max_length())
-      .map(|len| Line::new(len, word_indices.with_length(len)))
-      .collect();
-    let mut cells: Vec<Cell> = vec![];
-    for i in 0..height {
-      for j in 0..width {
-        cells.push(Cell {
-          row: i,
-          col: j,
-          ..Default::default()
-        });
-      }
-    }
-    let cell_index = |i, j| i * width + j;
-    let mut lines = vec![];
-    for i in 0..height {
-      let mut line = line_inits[width].clone();
-      for (j, cell) in line.cells.iter_mut().enumerate() {
-        let ci = cell_index(i, j);
-        *cell = ci as u32;
-        cells[ci].lines[0] = (lines.len() as u32, j as u8);
-      }
-      lines.push(line)
-    }
-
-    for j in 0..width {
-      let mut line = line_inits[height].clone();
-      for (i, cell) in line.cells.iter_mut().enumerate() {
-        let ci = cell_index(i, j);
-        *cell = ci as u32;
-        cells[ci].lines[1] = (lines.len() as u32, i as u8);
-      }
-      lines.push(line)
-    }
-    for line in &mut lines[..] {
-      line.reset_inventories(&dictionary);
-    }
-    let mut ret = Self {
-      dictionary,
-      word_indices,
-      width,
-      height,
-      lines,
-      cells,
-      choices: vec![],
-      tight_cells: Default::default(),
-    };
-    for i in 0..ret.cells.len() {
-      ret.update_cell(i);
-    }
-    Ok(ret)
-  }
-
-  pub fn update_cell(&mut self, index: usize) {
-    let c = &mut self.cells[index];
-    if c.choice.is_some() {
-      return;
-    }
-    let a = &self.lines[c.lines[0].0 as usize].inventories[c.lines[0].1 as usize];
-    let b = &self.lines[c.lines[1].0 as usize].inventories[c.lines[1].1 as usize];
-    let prod = LetterInventory::product(a, b);
+  fn commit_char(&mut self, cell_index: usize, ch: char) -> bool {
     self
-      .tight_cells
-      //.push(index as u32, prod.tletter_set().len())
-      .push(index as u32, !prod.total() as usize);
-    c.char_dist = prod;
+      .commit_ord(cell_index, LetterSet::index(ch).unwrap())
+      .is_some()
   }
 
-  fn get_next_choices(&self, rng: &mut ThreadRng) -> Choices {
-    if let Some((cell_index, n)) = self.tight_cells.peek() {
-      let cell_index = *cell_index as usize;
-      let inventory = &self.cells[cell_index].char_dist;
-      let set = inventory.letter_set();
-      //println!("cell {} has {}", cell_index, !n);
-      match set.len() {
-        0 => Choices::Failure,
-        1 => Choices::Single(cell_index, inventory.letter_set().chars().next().unwrap()),
-        _ => {
-          let mut to_draw: Vec<_> = inventory
-            .entries()
-            .map(|(ch, n)| (ch, n * 1000 + (ch as u32)))
-            //.map(|(ch, n)| (ch, rng.gen::<f32>().ln() / -(n as f32)))
-            .collect();
-          to_draw.sort_unstable_by(|(_, t1), (_, t2)| t2.cmp(t1));
-          Choices::Many(cell_index, to_draw.into_iter().map(|(ch, _)| ch).collect())
-        }
-      }
-    } else {
-      Choices::Success
-    }
-  }
-
-  pub fn choose(&mut self, cell_index: usize, ch: char) -> Option<Choice> {
-    let cell = &mut self.cells[cell_index];
-    if cell.choice != None || cell.char_dist.count(ch) == 0 {
+  fn commit_ord(&mut self, ci: usize, ord: u8) -> Option<usize> {
+    let cell = &self.puzzle.cells[ci];
+    let lis = &cell.lines;
+    let mut across = &mut self.line_states[lis[0].0 as usize];
+    let mut cost = 0;
+    if !across.position_letters[lis[0].1 as usize].contains_index(ord) {
       return None;
     }
-    self.tight_cells.remove(&(cell_index as u32));
-    cell.choice = Some(ch);
-    let lines = cell.lines;
-    let mut choice = Choice {
-      cell_index,
-      ..Default::default()
+    cost += across.ords.len();
+    *across = Rc::from(across.with_chosen(ord, lis[0].1));
+
+    let mut down = &mut self.line_states[lis[1].0 as usize];
+    if !down.position_letters[lis[1].1 as usize].contains_index(ord) {
+      return None;
+    }
+    cost += down.ords.len();
+    *down = Rc::from(down.with_chosen(ord, lis[1].1));
+
+    /* TODO: Confirm that the position_letters only changed the selected
+     * offset's letterset. If another position changed, the corresponding line
+     * for that position must be refreshed to filter out the affected words.
+     * This may cascade, even back to the original line.*/
+    Some(cost)
+  }
+
+  fn solve(self, budget: &mut usize, depth: usize) -> SolveResult {
+    if depth < 20 {
+      mv(0, 0);
+      addstr(&format!(
+        "\r{:*<}{}{} Choices                      ",
+        depth * 2,
+        "",
+        self.max_permutations()
+      ));
+      refresh();
+    }
+    let mut best_choice = None;
+    for ci in 0..self.puzzle.cells.len() {
+      let set = self.cell_set(ci);
+      let n = set.len();
+      if n == 0 {
+        return SolveResult::None;
+      }
+      if n == 1 {
+        continue;
+      }
+      if let Some((smallest_n, _, _)) = best_choice {
+        if smallest_n <= n {
+          continue;
+        }
+      }
+      best_choice = Some((n, ci, set));
+    }
+    if let Some((_, ci, set)) = best_choice {
+      for o in set.indices() {
+        // TODO:Shuffle
+        let mut child = self.clone();
+        if let Some(cost) = child.commit_ord(ci, o) {
+          if let Some(remaining) = budget.checked_sub(cost) {
+            *budget = remaining;
+          } else {
+            return SolveResult::Incomplete(
+              (0..self.puzzle.cells.len())
+                .filter_map(|ci| self.solved_char(ci).map(|ch| (ci, ch)))
+                .collect(),
+            );
+          }
+        } else {
+          // Direct constraint always works, but indirect effects could reveal a dead end.
+          continue;
+        }
+        let result = child.solve(budget, depth + 1);
+        match &result {
+          SolveResult::Solution(_) | SolveResult::Incomplete(_) => {
+            return result;
+          }
+          _ => {}
+        }
+      }
+      SolveResult::None
+    } else {
+      SolveResult::Solution(
+        (0..self.puzzle.cells.len())
+          .map(|ci| (ci, self.solved_char(ci).unwrap()))
+          .collect(),
+      )
+    }
+  }
+}
+
+#[derive(Clone)]
+pub enum Square {
+  Empty,
+  Fixed(char),
+  Solved(char),
+}
+
+pub struct Grid {
+  // Walls are missing squares.
+  squares: HashMap<(usize, usize), Square>,
+}
+
+impl Grid {
+  pub fn new_rectangle(width: usize, height: usize) -> Grid {
+    Grid {
+      squares: (1..=height)
+        .flat_map(|y| (1..=width).map(move |x| ((x, y), Square::Empty)))
+        .collect(),
+    }
+  }
+
+  pub fn new_circle(outer: i64, inner: i64) -> Grid {
+    let c = outer + 1;
+    Grid {
+      squares: (1..=(c * 2))
+        .flat_map(|y| (1..=(c * 2)).map(move |x| (x, y)))
+        .filter_map(|(x, y)| {
+          let dx = x - c;
+          let dy = y - c;
+          let r = dx * dx + dy * dy;
+          if r <= inner * inner || r >= outer * outer + outer {
+            None
+          } else {
+            Some((x as usize, y as usize))
+          }
+        })
+        .map(|p| (p, Square::Empty))
+        .collect(),
+    }
+  }
+
+  pub fn new_diamond(outer: i64, inner: i64) -> Grid {
+    let c = outer + 1;
+    Grid {
+      squares: (1..=(c * 2))
+        .flat_map(|y| (1..=(c * 2)).map(move |x| (x, y)))
+        .filter_map(|(x, y)| {
+          let mut dx = (x - c).abs();
+          let mut dy = (y - c).abs();
+          if dx == 0 {
+            dy += 1;
+          }
+          if dy == 0 {
+            dy += 1;
+          }
+          let r = dx + dy;
+          if r <= inner || r > outer {
+            None
+          } else {
+            Some((x as usize, y as usize))
+          }
+        })
+        .map(|p| (p, Square::Empty))
+        .collect(),
+    }
+  }
+
+  pub fn get_outline(&self) -> HashSet<(usize, usize)> {
+    let mut outline = HashSet::new();
+    for ((x, y), _) in &self.squares {
+      for dx in 0..=2 {
+        let x = x + dx - 1;
+        for dy in 0..=2 {
+          let y = y + dy - 1;
+          let loc = (x, y);
+          if !self.squares.contains_key(&loc) {
+            outline.insert(loc);
+          }
+        }
+      }
+    }
+    outline
+  }
+
+  pub fn solve(&mut self, dictionary: &Dictionary, _rng: &mut ThreadRng) -> bool {
+    let puzzle = Puzzle::new(self);
+    let mut solver = Solver::new(&puzzle, dictionary);
+    for (ci, position) in puzzle.cell_positions.iter().enumerate() {
+      if let Square::Fixed(ch) = self.squares[position] {
+        if !solver.commit_char(ci, ch) {
+          return false;
+        }
+      }
+    }
+    for square in self.squares.values_mut() {
+      if let Square::Solved(_) = *square {
+        *square = Square::Empty;
+      }
+    }
+    let empty = [];
+    let result = solver.solve(&mut 40000000000, 0);
+    let (ci_chars, ret) = match &result {
+      SolveResult::Incomplete(chars) => (&chars[..], false),
+      SolveResult::Solution(chars) => (&chars[..], true),
+      SolveResult::None => (&empty[..], false),
     };
-    for (slot, (index, offset)) in lines[..].iter().cloned().enumerate() {
-      let line = &mut self.lines[index as usize];
-
-      let save_line = line.clone();
-      match line.constrain(
-        self
-          .word_indices
-          .with_length_char_at(line.length, ch, offset as usize)
-          .unwrap(),
-        self.word_indices.with_length_claimed(line.length).unwrap(),
-        &self.dictionary,
-      ) {
-        ConstrainResult::Unique(claimed) => {
-          choice.line_undo.push((index, save_line, Some(claimed)));
-          self.word_indices.claim(line.length, claimed);
+    for (ci, ch) in ci_chars {
+      let pos = puzzle.cell_positions[*ci];
+      let square = self.squares.get_mut(&pos).unwrap();
+      match square.clone() {
+        Square::Fixed(CH) => {
+          //assert_eq!(CH, ch);
         }
-        ConstrainResult::Ok => {
-          choice.line_undo.push((index, save_line, None));
+        Square::Empty | Square::Solved(_) => {
+          *square = Square::Solved(*ch);
         }
-        ConstrainResult::Failed => {
-          self.undo(choice);
-          return None;
-        }
-      }
-      let cells = self.lines[index as usize].cells.clone();
-      for lc in cells {
-        self.update_cell(lc as usize);
       }
     }
-
-    Some(choice)
+    ret
   }
 
-  fn undo(&mut self, choice: Choice) {
-    let cell_index = choice.cell_index;
-    //println!("unchoosing cell {}", cell_index);
-    let cell = &mut self.cells[cell_index];
-    mv(cell.row as i32, cell.col as i32);
-    addch('_' as u32);
-    cell.choice = None;
-    for (index, saved_line, claimed) in choice.line_undo {
-      let line = &mut self.lines[index as usize];
-      *line = saved_line;
-      let cells = line.cells.clone();
-      let length = line.length;
-      for lc in cells {
-        self.update_cell(lc as usize);
+  pub fn set_square(&mut self, x: usize, y: usize, square: Square) {
+    use std::collections::hash_map::Entry;
+    match self.squares.entry((x, y)) {
+      Entry::Occupied(mut slot) => {
+        slot.insert(square);
       }
-      if let Some(claimed) = claimed {
-        self.word_indices.unclaim(length, claimed);
+      Entry::Vacant(slot) => {
+        slot.insert(square);
       }
     }
-  }
-
-  fn undo_one(&mut self) -> bool {
-    if let Some(choice) = self.choices.pop() {
-      self.undo(choice);
-      true
-    } else {
-      false
-    }
-  }
-
-  pub fn solve(&mut self, rng: &mut ThreadRng) -> std::result::Result<usize, usize> {
-    let start = std::time::Instant::now();
-    let mut count = 0;
-    if self.rec(&mut count, rng) {
-      let end = std::time::Instant::now();
-      mv(0, 10);
-      addstr(&format!("{}s ", (end - start).as_secs_f32()));
-      Ok(count)
-    } else {
-      Err(count)
-    }
-  }
-
-  fn rec(&mut self, c: &mut usize, rng: &mut ThreadRng) -> bool {
-    match self.get_next_choices(rng) {
-      Choices::Failure => {
-        *c += 1;
-        if *c % 0x1000 == 0 {
-          self.render(0, 0);
-          refresh();
-        }
-        false
-      }
-      Choices::Success => true,
-      Choices::Single(cell_index, ch) => {
-        if let Some(choice) = self.choose(cell_index, ch) {
-          self.choices.push(choice);
-          if self.rec(c, rng) {
-            return true;
-          }
-          let choice = self.choices.pop().unwrap();
-          self.undo(choice);
-        }
-        false
-      }
-      Choices::Many(cell_index, chars) => {
-        for ch in chars {
-          if let Some(choice) = self.choose(cell_index, ch) {
-            self.choices.push(choice);
-            if self.rec(c, rng) {
-              return true;
-            }
-            let choice = self.choices.pop().unwrap();
-            self.undo(choice);
-          }
-        }
-        false
-      }
-    }
-  }
-
-  fn prefilter(&mut self) -> f64 {
-    let mut lines_to_update: HashSet<_> = (0..self.lines.len()).collect();
-    let mut reduction = 1.;
-    while !lines_to_update.is_empty() {
-      let mut touched_lines = HashSet::new();
-      for l in lines_to_update {
-        let line = &self.lines[l];
-        let mut new_words = vec![];
-        new_words.reserve(line.words.len());
-        self
-          .dictionary
-          .visit_indices(line.words.iter().cloned(), |w, str| {
-            let mut bad_letters = str.chars().enumerate().filter(|(i, ch)| {
-              let cell_index = line.cells[*i] as usize;
-              let cell: &Cell = &self.cells[cell_index];
-              let other_inventories = cell.lines[..].iter().filter_map(|(l2, i2)| {
-                if *l2 as usize == l {
-                  None
-                } else {
-                  Some(&self.lines[*l2 as usize].inventories[*i2 as usize])
-                }
-              });
-
-              let mut conflicts = other_inventories.filter(|inv| inv.count(*ch) == 0);
-              conflicts.next().is_some()
-            });
-            if let None = bad_letters.next() {
-              new_words.push(w);
-            }
-          });
-        if new_words.len() != line.words.len() {
-          reduction *= line.words.len() as f64 / new_words.len() as f64;
-          let (line, dictionary) = (&mut self.lines[l], &self.dictionary);
-          line.words = new_words;
-          line.reset_inventories(&dictionary);
-          touched_lines.insert(l);
-        }
-      }
-      lines_to_update = touched_lines;
-    }
-    reduction
-  }
-
-  fn naive_solution_count(&self) -> f64 {
-    self
-      .lines
-      .iter()
-      .map(|line| line.words.len() as f64)
-      .product()
   }
 }
 
-fn clamp(lo: i32, mid: i32, hi: i32) -> i32 {
-  if mid < lo {
-    lo
-  } else if mid > hi {
-    hi
-  } else {
-    mid
-  }
-}
-
-impl View for Crossword {
+impl View for Grid {
   fn cursor(&self, x: i32, y: i32) {
     mv(y, x);
   }
   fn interact(&mut self) {
-    let (mut x, mut y) = (0, 0);
+    let (mut x, mut y) = (1, 1);
     let mut rng = rand::thread_rng();
     let mut downward = false;
     let mut msg_line = 0;
+    let dictionary = english_scrabble_dict().ok().unwrap();
     loop {
-      x = clamp(0, x, self.width as i32 - 1);
-      y = clamp(0, y, self.height as i32 - 1);
-      self.render(0, 0);
-      if self.choices.len() == self.height * self.width {
-        self.cursor(self.width as i32, self.height as i32);
-      } else {
-        self.cursor(x, y);
+      if x < 1 {
+        x = 1;
       }
+      if y < 2 {
+        y = 2;
+      }
+      self.render(0, 1);
+      self.cursor(x, y);
       let input = getch() as u8;
+      let u = x as usize;
+      let v = y as usize - 1;
       let message: Option<String> = match input as u8 {
         0x9 => {
+          // tab
           downward = !downward;
           None
         }
-        0x5c => Some(format!("{}x reduction", self.prefilter())),
+        0xa => {
+          // enter
+          if self.solve(&dictionary, &mut rng) {
+            Some(format!("Solved!"))
+          } else {
+            Some(format!("Failed!"))
+          }
+        }
+        0x20 => {
+          //clear spot
+          self.set_square(u, v, Square::Empty);
+          None
+        }
         0x7f => {
           // backspace
-          if let Some(choice) = self.choices.last() {
-            let cell = &self.cells[choice.cell_index];
-            x = cell.col as i32;
-            y = cell.row as i32;
-            self.undo_one();
-            Some(format!("undoing one"))
-          } else {
-            Some(format!("nothing to undo!"))
-          }
+          self.squares.remove(&(u, v));
+          None
         }
         //ch @ (0x41..=0x69) |
-        ch @ (0x61..=0x79) => {
-          let cell_index = (0..self.cells.len())
-            .filter(|ci| {
-              let cell = &self.cells[*ci];
-              (cell.col as i32, cell.row as i32) == (x, y)
-            })
-            .next()
-            .unwrap();
+        ch @ (0x61..=0x80) => {
           let ch = (ch as char).to_ascii_uppercase();
-          let ret = if let Some(existing) = self.cells[cell_index].choice {
-            if existing == ch {
-              None
-            } else {
-              Some(format!("Already filled (backspace it)"))
-            }
-          } else if let Some(choice) = self.choose(cell_index, ch) {
-            self.choices.push(choice);
-            Some(format!("{} added!", ch))
-          } else {
-            Some(format!("That's a dead end."))
-          };
-          if ret.is_none() {
-            if downward {
-              y += 1;
-            } else {
-              x += 1;
-            }
-          }
-          ret
-        }
-        0x20 => Some(match self.solve(&mut rng) {
-          Ok(steps) => format!(
-            "Solved in {} steps with {} choices",
-            steps,
-            self.choices.len()
-          ),
-          Err(steps) => format!("Unsolvable, tried {} steps", steps),
-        }),
-        0x60 => {
-          while self.undo_one() {}
+          self.set_square(u, v, Square::Fixed(ch));
           None
         }
         //escape
@@ -600,45 +534,31 @@ impl View for Crossword {
             _ => Some(format!("{:x}", input2)),
           }
         }
-        0x2c => Some(format!("Narrower")),
-        0x2e => Some(format!("Wider")),
-        0x2d => Some(format!("Shorter")),
-        0x3d => Some(format!("Taller")),
         c => Some(format!("Unrecognized")),
       };
-      msg_line += 1;
-      if msg_line == 10 {
-        msg_line = 0;
-      }
-      self.cursor(0, self.height as i32 + 2 + msg_line);
+      self.cursor(0, 0);
       if let Some(s) = message {
-        addstr(&format!("{:x}: {}", input, s));
-      } else {
-        addstr(&format!("{:x}: {} choices", input, self.choices.len()));
+        addstr(&format!("0x{:x}: {}", input, s));
       }
-      addstr("                         ");
+      addstr("                                            ");
       refresh();
     }
   }
 
-  fn render(&self, x: i32, y: i32) {
-    let mut height = 0;
-    getmaxyx(stdscr(), &mut height, &mut 0);
-    mv(1, 10);
-    addstr(&format!(
-      "{} solutions seem to remain.                                                           ",
-      self.naive_solution_count()
-    ));
-    for cell in &self.cells {
-      mv(y + cell.row as i32, x + cell.col as i32);
-      match cell.choice {
-        Some(ch) => {
-          addch(ch as u32);
-        }
-        None => {
-          addch('_' as u32);
-        }
-      }
+  fn render(&self, left: i32, top: i32) {
+    for ((x, y), square) in &self.squares {
+      mv(*y as i32 + top, *x as i32 + left);
+
+      addch(match square {
+        Square::Empty => ' ',
+        Square::Fixed(ch) => ch.to_ascii_uppercase(),
+        Square::Solved(ch) => ch.to_ascii_lowercase(),
+      } as u32);
+    }
+    for (x, y) in self.get_outline() {
+      mv(y as i32 + top, x as i32 + left);
+
+      addch('#' as u32);
     }
   }
 }
